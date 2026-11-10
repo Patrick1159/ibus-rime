@@ -28,6 +28,7 @@ typedef struct {
   VoiceState state;
   guint hotkey;
   gboolean review_enabled; /* FINAL text goes to REVIEW instead of being committed */
+  const char *cursor_mark;  /* review cursor glyph, see voice_cursor_mark(); set by the glue */
   gboolean enter_sends;    /* in REVIEW: Enter commits + sends Return, Shift+Enter commits only;
                               when FALSE (default) both just commit. Set by the glue. */
   gboolean armed;          /* bare hotkey press seen, waiting for its release */
@@ -56,7 +57,7 @@ typedef struct {
  * label (the only aligned column the panel draws) is a scrollbar segment: VOICE_SCROLL_THUMB
  * for the visible part's share of the whole text, VOICE_SCROLL_TRACK elsewhere. */
 #define VOICE_REVIEW_PREFIX "🎙 "
-#define VOICE_REVIEW_CURSOR "˰" /* narrow, sits low: marks the gap without taking a cell */
+#define VOICE_REVIEW_CURSOR "˰" /* default: narrow, sits low, marks the gap without taking a cell */
 #define VOICE_REVIEW_RULE "──────────────────────────────" /* 30 × U+2500 */
 #define VOICE_SCROLL_THUMB "┃"
 #define VOICE_SCROLL_TRACK "┆"
@@ -85,6 +86,8 @@ VoiceAction voice_fsm_disconnected(VoiceFsm *f);
 VoiceAction voice_fsm_focus_out(VoiceFsm *f);
 VoiceAction voice_fsm_focus_in(VoiceFsm *f); /* re-shows the current aux text */
 
+/* Cursor glyph for voice/cursor: "caret" ˰ (default), "bar" |, "triangle" ▲. */
+const char *voice_cursor_mark(const char *style);
 /* Header block of the review note: "🎙 语音草稿 · ⏎ 上屏 · Esc 放弃 · 右Alt 续说\n" VOICE_REVIEW_RULE. */
 void voice_review_header(guint hotkey, GString *out);
 /* Wrap text to cols display columns: a line never starts with closing punctuation (it may

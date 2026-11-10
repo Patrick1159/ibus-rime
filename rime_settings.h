@@ -33,6 +33,7 @@ struct IBusRimeSettings {
   guint voice_hotkey;
   gboolean voice_review;
   gboolean voice_enter_sends;
+  const char* voice_cursor_mark;  /* static glyph from voice_cursor_mark() */
 };
 
 extern struct IBusRimeSettings g_ibus_rime_settings;

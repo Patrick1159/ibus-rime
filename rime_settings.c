@@ -1,5 +1,6 @@
 #include "rime_config.h"
 #include "rime_settings.h"
+#include "voice_fsm.h"
 #include <rime_api.h>
 #include <string.h>
 
@@ -22,6 +23,7 @@ static struct IBusRimeSettings ibus_rime_settings_default = {
   .voice_hotkey = IBUS_KEY_Alt_R,
   .voice_review = TRUE,
   .voice_enter_sends = FALSE,
+  .voice_cursor_mark = VOICE_REVIEW_CURSOR,
 };
 
 struct IBusRimeSettings g_ibus_rime_settings;
@@ -109,6 +111,9 @@ ibus_rime_load_settings()
   if (rime_api->config_get_bool(&config, "voice/enter_sends", &voice_enter_sends)) {
     g_ibus_rime_settings.voice_enter_sends = !!voice_enter_sends;
   }
+
+  g_ibus_rime_settings.voice_cursor_mark =
+    voice_cursor_mark(rime_api->config_get_cstring(&config, "voice/cursor"));
 
   rime_api->config_close(&config);
 }

@@ -322,8 +322,12 @@ static void ibus_rime_engine_update(IBusRimeEngine *rime_engine)
   if (!rime_api->get_context(rime_engine->session_id, &context) ||
       context.composition.length == 0) {
     ibus_engine_hide_preedit_text((IBusEngine *)rime_engine);
-    ibus_engine_hide_auxiliary_text((IBusEngine *)rime_engine);
-    ibus_engine_hide_lookup_table((IBusEngine *)rime_engine);
+    /* while dictating or reviewing, aux and the table belong to the voice UI: hiding them
+     * here and re-showing them right after makes the panel flash on every key release */
+    if (rime_engine->voice.state == VOICE_IDLE) {
+      ibus_engine_hide_auxiliary_text((IBusEngine *)rime_engine);
+      ibus_engine_hide_lookup_table((IBusEngine *)rime_engine);
+    }
     rime_api->free_context(&context);
     voice_reshow_aux(rime_engine);
     return;
@@ -439,7 +443,7 @@ static void ibus_rime_engine_update(IBusRimeEngine *rime_engine)
   if (auxiliary_text) {
     ibus_engine_update_auxiliary_text(
         (IBusEngine *)rime_engine, auxiliary_text, TRUE);
-  } else {
+  } else if (rime_engine->voice.state == VOICE_IDLE) {
     ibus_engine_hide_auxiliary_text((IBusEngine *)rime_engine);
   }
 
@@ -612,17 +616,28 @@ show_voice_note (IBusRimeEngine *rime_engine)
   rime_engine->voice_note_shown = TRUE;
 }
 
-/* Rime's UI update hides the auxiliary text and the lookup table; put the voice status, or
- * the review header and note, back while a session or review is active. */
+/* After Rime's UI update: Rime's candidates own the table while it composes inside a review
+ * (the aux then shows where the text will land); otherwise put the voice UI back only if
+ * Rime's UI displaced it, so unchanged panels are not re-sent on every key. */
 static void
 voice_reshow_aux (IBusRimeEngine *rime_engine)
 {
-  if (rime_engine->voice.state == VOICE_IDLE) {
+  IBusEngine *engine = (IBusEngine *)rime_engine;
+  switch (rime_engine->voice.state) {
+  case VOICE_IDLE:
     return;
-  }
-  show_voice_aux((IBusEngine *)rime_engine, rime_engine->voice.aux->str);
-  if (rime_engine->voice.state == VOICE_REVIEW) {
-    show_voice_note(rime_engine);
+  case VOICE_REVIEW:
+    if (rime_is_composing(rime_engine)) {
+      rime_engine->voice_note_shown = FALSE;
+      show_voice_aux(engine, voice_fsm_compose_hint(&rime_engine->voice));
+    } else if (!rime_engine->voice_note_shown) {
+      show_voice_aux(engine, rime_engine->voice.aux->str);
+      show_voice_note(rime_engine);
+    }
+    return;
+  default:
+    show_voice_aux(engine, rime_engine->voice.aux->str);
+    return;
   }
 }
 
@@ -647,6 +662,7 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
 {
   IBusEngine *engine = (IBusEngine *)rime_engine;
   if (a.send == VOICE_CMD_START) {
+    hide_voice_note(rime_engine);
     voice_client_free(rime_engine->voice_client);
     gchar *path = voice_client_default_path();
     rime_engine->voice_client =
@@ -711,6 +727,7 @@ ibus_rime_engine_process_key_event (IBusEngine *engine,
   rime_engine->voice.hotkey = g_ibus_rime_settings.voice_hotkey;
   rime_engine->voice.review_enabled = g_ibus_rime_settings.voice_review;
   rime_engine->voice.enter_sends = g_ibus_rime_settings.voice_enter_sends;
+  rime_engine->voice.cursor_mark = g_ibus_rime_settings.voice_cursor_mark;
   VoiceAction action = voice_fsm_key(&rime_engine->voice, keyval, keycode,
                                      modifiers, rime_is_composing(rime_engine));
   if (apply_voice_action(rime_engine, action)) {

@@ -53,11 +53,13 @@ static void on_line(GObject *src, GAsyncResult *res, gpointer data) {
   if (!c->dead && !line) {
     report_closed(c);
   } else if (!c->dead) {
-    g_strchomp(line);
-    const char *payload;
-    VoiceEvType type = voice_proto_parse(line, &payload);
-    if (type == VOICE_EV_FINAL || type == VOICE_EV_ERR) c->done = TRUE;
-    if (type != VOICE_EV_INVALID) c->on_event(type, payload, c->user_data);
+    if (g_utf8_validate(line, -1, NULL)) { /* drop malformed lines, keep reading */
+      g_strchomp(line);
+      const char *payload;
+      VoiceEvType type = voice_proto_parse(line, &payload);
+      if (type == VOICE_EV_FINAL || type == VOICE_EV_ERR) c->done = TRUE;
+      if (type != VOICE_EV_INVALID) c->on_event(type, payload, c->user_data);
+    }
     if (!c->dead && !c->done) read_next(c);
   }
   g_free(line);

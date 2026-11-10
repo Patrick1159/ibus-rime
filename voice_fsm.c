@@ -23,6 +23,7 @@ void voice_fsm_init(VoiceFsm *f, guint hotkey_keyval, gboolean review_enabled) {
   f->note = g_ptr_array_new_with_free_func(g_free);
   f->note_labels = g_ptr_array_new();  /* borrowed static strings */
   f->enter_sends = FALSE;
+  f->cursor_mark = VOICE_REVIEW_CURSOR;
   f->note_cursor = -1;
   f->compose_hint = g_string_new("");
   f->commit_buf = g_string_new("");
@@ -48,8 +49,6 @@ static const char *set_aux(VoiceFsm *f, const char *a, const char *b) {
   return f->aux->str;
 }
 
-/* ---- review buffer ---- */
-
 static gsize byte_at(VoiceFsm *f, glong chars) {
   return g_utf8_offset_to_pointer(f->review->str, chars) - f->review->str;
 }
@@ -57,8 +56,6 @@ static gsize byte_at(VoiceFsm *f, glong chars) {
 static guint review_len(VoiceFsm *f) {
   return g_utf8_strlen(f->review->str, -1);
 }
-
-/* ---- review note layout ---- */
 
 static gboolean is_closing_punct(gunichar c) {
   return g_utf8_strchr("，。、；：？！）》」』”’…,.;:?!)]}%", -1, c) != NULL;
@@ -107,6 +104,12 @@ GPtrArray *voice_wrap(const char *text, guint cols) {
   }
   g_ptr_array_add(lines, g_string_free(cur, FALSE));
   return lines;
+}
+
+const char *voice_cursor_mark(const char *style) {
+  if (style && !strcmp(style, "bar")) return "|";
+  if (style && !strcmp(style, "triangle")) return "▲";
+  return VOICE_REVIEW_CURSOR;
 }
 
 static const char *hotkey_label(guint hotkey) {
@@ -158,7 +161,7 @@ static const char *render_review(VoiceFsm *f) {
   guint cur = row_of(starts, f->cursor);
   GString *row = g_string_new(rows->pdata[cur]);
   const char *p = g_utf8_offset_to_pointer(row->str, f->cursor - g_array_index(starts, guint, cur));
-  g_string_insert(row, p - row->str, VOICE_REVIEW_CURSOR);
+  g_string_insert(row, p - row->str, f->cursor_mark);
   g_free(rows->pdata[cur]);
   rows->pdata[cur] = g_string_free(row, FALSE);
 
@@ -202,10 +205,32 @@ static void move_row(VoiceFsm *f, gint delta) {
   if (to >= 0 && to < (gint)rows->len) {
     guint offset = f->cursor - g_array_index(starts, guint, cur);
     guint len = g_utf8_strlen(rows->pdata[to], -1);
-    f->cursor = g_array_index(starts, guint, to) + MIN(offset, len);
+    /* the position just past a row's last char belongs to the next row, so a target row
+     * other than the last can only take up to its last char */
+    guint max = (to + 1 < (gint)rows->len && len > 0) ? len - 1 : len;
+    f->cursor = g_array_index(starts, guint, to) + MIN(offset, max);
   }
   g_ptr_array_unref(rows);
   g_array_free(starts, TRUE);
+}
+
+/* Ctrl+Left/Right: chunks are separated by punctuation and spaces, which suits both Chinese
+ * (no spaces, clauses between punctuation) and English words. */
+static gboolean is_chunk_sep(VoiceFsm *f, guint i) {
+  gunichar c = g_utf8_get_char(f->review->str + byte_at(f, i));
+  return g_unichar_isspace(c) || g_unichar_ispunct(c);
+}
+
+static void jump_chunk(VoiceFsm *f, gboolean forward) {
+  guint len = review_len(f), p = f->cursor;
+  if (forward) {
+    while (p < len && !is_chunk_sep(f, p)) ++p;
+    while (p < len && is_chunk_sep(f, p)) ++p;
+  } else {
+    while (p > 0 && is_chunk_sep(f, p - 1)) --p;
+    while (p > 0 && !is_chunk_sep(f, p - 1)) --p;
+  }
+  f->cursor = p;
 }
 
 static void review_insert(VoiceFsm *f, const char *text) {
@@ -222,8 +247,6 @@ static void review_reset(VoiceFsm *f) {
   g_string_truncate(f->review, 0);
   f->cursor = 0;
 }
-
-/* ---- sessions ---- */
 
 static gboolean bare(guint modifiers) {
   return (modifiers & ~IGNORED_MODS) == 0;
@@ -304,10 +327,12 @@ static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboole
   case IBUS_KEY_Escape:
     return finish_review(f, FALSE, FALSE);
   case IBUS_KEY_Left:
-    if (f->cursor > 0) f->cursor--;
+    if (modifiers & IBUS_CONTROL_MASK) jump_chunk(f, FALSE);
+    else if (f->cursor > 0) f->cursor--;
     break;
   case IBUS_KEY_Right:
-    if (f->cursor < len) f->cursor++;
+    if (modifiers & IBUS_CONTROL_MASK) jump_chunk(f, TRUE);
+    else if (f->cursor < len) f->cursor++;
     break;
   case IBUS_KEY_Up:
     move_row(f, -1);
@@ -450,11 +475,13 @@ VoiceAction voice_fsm_disconnected(VoiceFsm *f) {
 }
 
 VoiceAction voice_fsm_focus_out(VoiceFsm *f) {
+  f->armed = FALSE;
   if (f->state != VOICE_RECORDING && f->state != VOICE_FINALIZING) return pass(FALSE);
   return leave_session(f, VOICE_CMD_CANCEL, VOICE_NOTIFY_FOCUS_LOST, TRUE);
 }
 
 VoiceAction voice_fsm_focus_in(VoiceFsm *f) {
+  f->armed = FALSE;
   VoiceAction a = pass(FALSE);
   if (f->state != VOICE_IDLE) a.aux = f->aux->str;
   a.note = f->state == VOICE_REVIEW;
