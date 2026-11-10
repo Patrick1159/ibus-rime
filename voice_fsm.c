@@ -6,7 +6,7 @@
 #define COMMAND_MODS (IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_SUPER_MASK | IBUS_MOD4_MASK)
 
 static VoiceAction pass(gboolean consume) {
-  VoiceAction a = {consume, VOICE_CMD_NONE, NULL, NULL, NULL, FALSE};
+  VoiceAction a = {.consume = consume, .send = VOICE_CMD_NONE};
   return a;
 }
 
@@ -20,6 +20,9 @@ void voice_fsm_init(VoiceFsm *f, guint hotkey_keyval, gboolean review_enabled) {
   f->partial = g_string_new("");
   f->review = g_string_new("");
   f->cursor = 0;
+  f->note = g_ptr_array_new_with_free_func(g_free);
+  f->note_cursor = -1;
+  f->compose_hint = g_string_new("");
   f->commit_buf = g_string_new("");
   f->notify_buf = g_string_new("");
   f->queued = g_array_new(FALSE, FALSE, sizeof(VoiceKey));
@@ -29,6 +32,8 @@ void voice_fsm_clear(VoiceFsm *f) {
   g_string_free(f->aux, TRUE);
   g_string_free(f->partial, TRUE);
   g_string_free(f->review, TRUE);
+  g_ptr_array_unref(f->note);
+  g_string_free(f->compose_hint, TRUE);
   g_string_free(f->commit_buf, TRUE);
   g_string_free(f->notify_buf, TRUE);
   g_array_free(f->queued, TRUE);
@@ -61,7 +66,7 @@ static gboolean is_ascii_word(gunichar c) {
 }
 
 static guint cols_of(gunichar c) {
-  return g_unichar_iswide(c) ? 2 : 1;
+  return g_unichar_iswide_cjk(c) ? 2 : 1;
 }
 
 GPtrArray *voice_wrap(const char *text, guint cols) {
@@ -109,35 +114,80 @@ void voice_review_header(guint hotkey, GString *out) {
   case IBUS_KEY_Shift_R: label = "右Shift"; break;
   default: label = ibus_keyval_name(hotkey); break;
   }
-  g_string_append_printf(out, VOICE_REVIEW_PREFIX "语音输入 · ⏎ 上屏 · Esc 放弃 · %s 续说",
+  g_string_append_printf(out, VOICE_REVIEW_PREFIX "语音草稿 · ⏎ 上屏 · Esc 放弃 · %s 续说",
                          label ? label : "热键");
 }
 
-static const char *render_review(VoiceFsm *f) {
-  GString *body = g_string_new(f->review->str);
-  g_string_insert(body, byte_at(f, f->cursor), VOICE_REVIEW_CURSOR);
-  GPtrArray *lines = voice_wrap(body->str, VOICE_REVIEW_COLS);
-  guint cursor_line = 0;
-  for (guint i = 0; i < lines->len; ++i) {
-    if (strstr(lines->pdata[i], VOICE_REVIEW_CURSOR)) cursor_line = i;
+/* Rows of the plain review text and the character offset each row starts at. The cursor
+ * marker takes no wrap width, so rows stay put while the cursor moves. */
+static GPtrArray *review_rows(VoiceFsm *f, GArray *starts) {
+  GPtrArray *rows = voice_wrap(f->review->str, VOICE_REVIEW_COLS);
+  guint at = 0;
+  for (guint i = 0; i < rows->len; ++i) {
+    g_array_append_val(starts, at);
+    at += g_utf8_strlen(rows->pdata[i], -1);
   }
-  guint first = 0, last = lines->len;
-  if (lines->len > VOICE_REVIEW_MAX_LINES) {
-    gint s = (gint)cursor_line - VOICE_REVIEW_MAX_LINES / 2;
-    first = (guint)CLAMP(s, 0, (gint)(lines->len - VOICE_REVIEW_MAX_LINES));
+  return rows;
+}
+
+static guint row_of(GArray *starts, guint cursor) {
+  guint r = 0;
+  while (r + 1 < starts->len && g_array_index(starts, guint, r + 1) <= cursor) ++r;
+  return r;
+}
+
+static void clear_note(VoiceFsm *f) {
+  g_ptr_array_set_size(f->note, 0);
+  f->note_cursor = -1;
+  g_string_truncate(f->compose_hint, 0);
+}
+
+/* Lays out the note rows and returns the header for the aux text. */
+static const char *render_review(VoiceFsm *f) {
+  GArray *starts = g_array_new(FALSE, FALSE, sizeof(guint));
+  GPtrArray *rows = review_rows(f, starts);
+  guint cur = row_of(starts, f->cursor);
+  GString *row = g_string_new(rows->pdata[cur]);
+  const char *p = g_utf8_offset_to_pointer(row->str, f->cursor - g_array_index(starts, guint, cur));
+  g_string_insert(row, p - row->str, VOICE_REVIEW_CURSOR);
+  g_free(rows->pdata[cur]);
+  rows->pdata[cur] = g_string_free(row, FALSE);
+
+  guint first = 0, last = rows->len;
+  if (rows->len > VOICE_REVIEW_MAX_LINES) {
+    gint s = (gint)cur - VOICE_REVIEW_MAX_LINES / 2;
+    first = (guint)CLAMP(s, 0, (gint)(rows->len - VOICE_REVIEW_MAX_LINES));
     last = first + VOICE_REVIEW_MAX_LINES;
   }
+  clear_note(f);
+  if (first > 0) g_ptr_array_add(f->note, g_strdup(VOICE_REVIEW_MORE));
+  for (guint i = first; i < last; ++i) {
+    if (i == cur) f->note_cursor = f->note->len;
+    g_ptr_array_add(f->note, g_strdup(rows->pdata[i]));
+  }
+  if (last < rows->len) g_ptr_array_add(f->note, g_strdup(VOICE_REVIEW_MORE));
+  g_string_assign(f->compose_hint, VOICE_COMPOSE_PREFIX);
+  g_string_append(f->compose_hint, rows->pdata[cur]);
+
+  g_ptr_array_unref(rows);
+  g_array_free(starts, TRUE);
   g_string_truncate(f->aux, 0);
   voice_review_header(f->hotkey, f->aux);
-  if (first > 0) g_string_append(f->aux, "\n" VOICE_REVIEW_MORE);
-  for (guint i = first; i < last; ++i) {
-    g_string_append_c(f->aux, '\n');
-    g_string_append(f->aux, lines->pdata[i]);
-  }
-  if (last < lines->len) g_string_append(f->aux, "\n" VOICE_REVIEW_MORE);
-  g_ptr_array_unref(lines);
-  g_string_free(body, TRUE);
   return f->aux->str;
+}
+
+/* Up/Down: same character offset in the neighbouring row, clamped to its length. */
+static void move_row(VoiceFsm *f, gint delta) {
+  GArray *starts = g_array_new(FALSE, FALSE, sizeof(guint));
+  GPtrArray *rows = review_rows(f, starts);
+  gint cur = row_of(starts, f->cursor), to = cur + delta;
+  if (to >= 0 && to < (gint)rows->len) {
+    guint offset = f->cursor - g_array_index(starts, guint, cur);
+    guint len = g_utf8_strlen(rows->pdata[to], -1);
+    f->cursor = g_array_index(starts, guint, to) + MIN(offset, len);
+  }
+  g_ptr_array_unref(rows);
+  g_array_free(starts, TRUE);
 }
 
 static void review_insert(VoiceFsm *f, const char *text) {
@@ -182,8 +232,10 @@ static VoiceAction leave_session(VoiceFsm *f, VoiceCmd send, const char *notify,
   if (f->from_review) {
     f->state = VOICE_REVIEW;
     a.aux = render_review(f);
+    a.note = TRUE;
   } else {
     f->state = VOICE_IDLE;
+    clear_note(f);
     a.aux = set_aux(f, "", NULL);
   }
   f->from_review = FALSE;
@@ -200,6 +252,7 @@ static VoiceAction finish_review(VoiceFsm *f, gboolean commit) {
     a.commit = f->commit_buf->len ? f->commit_buf->str : NULL;
   }
   review_reset(f);
+  clear_note(f);
   f->state = VOICE_IDLE;
   a.aux = set_aux(f, "", NULL);
   return a;
@@ -236,6 +289,12 @@ static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboole
   case IBUS_KEY_Right:
     if (f->cursor < len) f->cursor++;
     break;
+  case IBUS_KEY_Up:
+    move_row(f, -1);
+    break;
+  case IBUS_KEY_Down:
+    move_row(f, 1);
+    break;
   case IBUS_KEY_Home:
     f->cursor = 0;
     break;
@@ -252,6 +311,7 @@ static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboole
     return pass(FALSE); /* let Rime have it; the glue calls voice_fsm_unhandled if it declines */
   }
   a.aux = render_review(f);
+  a.note = TRUE;
   return a;
 }
 
@@ -319,6 +379,7 @@ VoiceAction voice_fsm_unhandled(VoiceFsm *f, guint keyval, guint modifiers) {
     g_unichar_to_utf8(ch, buf);
     review_insert(f, buf);
     a.aux = render_review(f);
+    a.note = TRUE;
   }
   return a;
 }
@@ -328,6 +389,7 @@ VoiceAction voice_fsm_insert(VoiceFsm *f, const char *text) {
   VoiceAction a = pass(TRUE);
   review_insert(f, text);
   a.aux = render_review(f);
+  a.note = TRUE;
   return a;
 }
 
@@ -375,7 +437,17 @@ VoiceAction voice_fsm_focus_out(VoiceFsm *f) {
 VoiceAction voice_fsm_focus_in(VoiceFsm *f) {
   VoiceAction a = pass(FALSE);
   if (f->state != VOICE_IDLE) a.aux = f->aux->str;
+  a.note = f->state == VOICE_REVIEW;
   return a;
+}
+
+GPtrArray *voice_fsm_note(VoiceFsm *f, gint *cursor_row) {
+  *cursor_row = f->note_cursor;
+  return f->note;
+}
+
+const char *voice_fsm_compose_hint(VoiceFsm *f) {
+  return f->compose_hint->str;
 }
 
 const VoiceKey *voice_fsm_queued(VoiceFsm *f, guint *n_out) {

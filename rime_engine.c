@@ -24,6 +24,8 @@ struct _IBusRimeEngine {
   IBusPropList* props;
   VoiceFsm voice;
   VoiceClient* voice_client;
+  IBusLookupTable* voice_table; /* review note rows; separate from Rime's candidates */
+  gboolean voice_note_shown;
 };
 
 struct _IBusRimeEngineClass {
@@ -110,6 +112,9 @@ ibus_rime_engine_init (IBusRimeEngine *rime_engine)
   voice_fsm_init(&rime_engine->voice, g_ibus_rime_settings.voice_hotkey,
                  g_ibus_rime_settings.voice_review);
   rime_engine->voice_client = NULL;
+  rime_engine->voice_table = ibus_lookup_table_new(VOICE_REVIEW_MAX_LINES + 2, 0, FALSE, FALSE);
+  g_object_ref_sink(rime_engine->voice_table);
+  rime_engine->voice_note_shown = FALSE;
 
   RIME_STRUCT_INIT(RimeStatus, rime_engine->status);
   RIME_STRUCT_CLEAR(rime_engine->status);
@@ -169,6 +174,7 @@ ibus_rime_engine_destroy (IBusRimeEngine *rime_engine)
     rime_engine->voice_client = NULL;
     voice_fsm_clear(&rime_engine->voice);
     rime_engine->voice.aux = NULL;
+    g_clear_object(&rime_engine->voice_table);
   }
   if (rime_engine->session_id) {
     rime_api->destroy_session(rime_engine->session_id);
@@ -558,13 +564,62 @@ show_voice_aux (IBusEngine *engine, const char *text)
   }
 }
 
-/* Rime's UI update hides the auxiliary text; put the voice text back while a session or
- * review is active. */
+static gboolean rime_is_composing (IBusRimeEngine *rime_engine);
+
+static void
+hide_voice_note (IBusRimeEngine *rime_engine)
+{
+  if (rime_engine->voice_note_shown) {
+    ibus_engine_hide_lookup_table((IBusEngine *)rime_engine);
+    rime_engine->voice_note_shown = FALSE;
+  }
+}
+
+/* The review text is drawn as rows of a lookup table so the panel styles it as content and
+ * highlights the cursor row. While Rime composes inside the review, its candidates own the
+ * table and the aux shows the row the chosen text will land in. */
+static void
+show_voice_note (IBusRimeEngine *rime_engine)
+{
+  IBusEngine *engine = (IBusEngine *)rime_engine;
+  gint cursor_row = -1;
+  GPtrArray *rows = voice_fsm_note(&rime_engine->voice, &cursor_row);
+  if (rows->len == 0) {
+    hide_voice_note(rime_engine);
+    return;
+  }
+  if (rime_is_composing(rime_engine)) {
+    rime_engine->voice_note_shown = FALSE;
+    show_voice_aux(engine, voice_fsm_compose_hint(&rime_engine->voice));
+    return;
+  }
+  IBusLookupTable *t = rime_engine->voice_table;
+  ibus_lookup_table_clear(t);
+  ibus_lookup_table_set_page_size(t, rows->len);
+  ibus_lookup_table_set_orientation(t, IBUS_ORIENTATION_VERTICAL);
+  for (guint i = 0; i < rows->len; ++i) {
+    ibus_lookup_table_append_candidate(t, ibus_text_new_from_string(rows->pdata[i]));
+    ibus_lookup_table_set_label(t, i, ibus_text_new_from_static_string(" "));
+  }
+  ibus_lookup_table_set_cursor_visible(t, cursor_row >= 0);
+  if (cursor_row >= 0) {
+    ibus_lookup_table_set_cursor_pos(t, cursor_row);
+  }
+  ibus_engine_update_lookup_table(engine, t, TRUE);
+  rime_engine->voice_note_shown = TRUE;
+}
+
+/* Rime's UI update hides the auxiliary text and the lookup table; put the voice status, or
+ * the review header and note, back while a session or review is active. */
 static void
 voice_reshow_aux (IBusRimeEngine *rime_engine)
 {
-  if (rime_engine->voice.state != VOICE_IDLE) {
-    show_voice_aux((IBusEngine *)rime_engine, rime_engine->voice.aux->str);
+  if (rime_engine->voice.state == VOICE_IDLE) {
+    return;
+  }
+  show_voice_aux((IBusEngine *)rime_engine, rime_engine->voice.aux->str);
+  if (rime_engine->voice.state == VOICE_REVIEW) {
+    show_voice_note(rime_engine);
   }
 }
 
@@ -604,6 +659,12 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
   }
   if (a.aux) {
     show_voice_aux(engine, a.aux);
+    if (!*a.aux) {
+      hide_voice_note(rime_engine);
+    }
+  }
+  if (a.note) {
+    show_voice_note(rime_engine);
   }
   if (a.commit) {
     ibus_engine_commit_text(engine, ibus_text_new_from_string(a.commit));

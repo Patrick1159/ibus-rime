@@ -13,7 +13,9 @@ typedef struct {
   gboolean consume;     /* TRUE: voice handled the key. FALSE: hand it to Rime; while in REVIEW
                            the glue then calls voice_fsm_unhandled() if Rime declines it */
   VoiceCmd send;        /* command to send to the daemon */
-  const char *aux;      /* NULL: leave unchanged; "": hide; else show as IBus auxiliary text */
+  const char *aux;      /* NULL: leave unchanged; "": hide aux and the note; else show as IBus
+                           auxiliary text (status line, or the review header) */
+  gboolean note;        /* review note rows changed: redraw them from voice_fsm_note() */
   const char *commit;   /* NULL: nothing to commit (owned by the fsm) */
   const char *notify;   /* NULL: no desktop notification */
   gboolean replay;      /* after commit, replay voice_fsm_queued() keys in order */
@@ -31,6 +33,9 @@ typedef struct {
   GString *partial;        /* latest PARTIAL payload */
   GString *review;         /* review buffer */
   guint cursor;            /* review cursor, in characters */
+  GPtrArray *note;         /* visible note rows (wrapped review text, cursor marked) */
+  gint note_cursor;        /* index in note of the row holding the cursor, -1 if none */
+  GString *compose_hint;   /* aux text while Rime composes inside the review */
   GString *commit_buf;
   GString *notify_buf;
   GArray *queued;          /* VoiceKey typed while FINALIZING */
@@ -40,12 +45,14 @@ typedef struct {
 #define VOICE_AUX_FINALIZING "⏳ 识别中…"
 #define VOICE_AUX_PARTIAL_RECORDING "🎤 "
 #define VOICE_AUX_PARTIAL_FINALIZING "⏳ "
-/* Review note: a header line, then the text wrapped to VOICE_REVIEW_COLS display columns
- * (CJK = 2), at most VOICE_REVIEW_MAX_LINES lines around the cursor; a VOICE_REVIEW_MORE
- * line marks hidden lines above/below. */
-#define VOICE_REVIEW_PREFIX "📝 "
-#define VOICE_REVIEW_CURSOR "‸"
+/* Review note: the header goes to the auxiliary text; the review text, wrapped to
+ * VOICE_REVIEW_COLS display columns (wide/ambiguous CJK = 2), is shown as rows of the IBus
+ * lookup table so the cursor row gets the theme's highlight. At most VOICE_REVIEW_MAX_LINES
+ * rows around the cursor are shown; a VOICE_REVIEW_MORE row marks hidden rows above/below. */
+#define VOICE_REVIEW_PREFIX "🎙 "
+#define VOICE_REVIEW_CURSOR "▲"
 #define VOICE_REVIEW_MORE "⋯"
+#define VOICE_COMPOSE_PREFIX "✎ "
 #define VOICE_REVIEW_COLS 36
 #define VOICE_REVIEW_MAX_LINES 6
 #define VOICE_NOTIFY_FOCUS_LOST "语音输入已取消（焦点切走）"
@@ -69,12 +76,17 @@ VoiceAction voice_fsm_disconnected(VoiceFsm *f);
 VoiceAction voice_fsm_focus_out(VoiceFsm *f);
 VoiceAction voice_fsm_focus_in(VoiceFsm *f); /* re-shows the current aux text */
 
-/* Header line of the review note, e.g. "📝 语音输入 · ⏎ 上屏 · Esc 放弃 · 右Alt 续说". */
+/* Header of the review note, e.g. "🎙 语音草稿 · ⏎ 上屏 · Esc 放弃 · 右Alt 续说". */
 void voice_review_header(guint hotkey, GString *out);
 /* Wrap text to cols display columns: a line never starts with closing punctuation (it may
  * overflow by one character instead), and an ASCII word shorter than cols/2 is moved whole to
  * the next line. Returns newly allocated strings (free with g_ptr_array_unref). */
 GPtrArray *voice_wrap(const char *text, guint cols);
+
+/* Rows of the review note (borrowed, valid until the next fsm call) and the cursor row. */
+GPtrArray *voice_fsm_note(VoiceFsm *f, gint *cursor_row);
+/* Aux text while Rime composes inside the review: VOICE_COMPOSE_PREFIX + the cursor row. */
+const char *voice_fsm_compose_hint(VoiceFsm *f);
 
 const VoiceKey *voice_fsm_queued(VoiceFsm *f, guint *n_out);
 void voice_fsm_drop_queue(VoiceFsm *f);
