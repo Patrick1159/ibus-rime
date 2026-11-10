@@ -582,7 +582,6 @@ voice_commit_or_insert (IBusRimeEngine *rime_engine, const char *text)
 static gboolean ibus_rime_engine_process_key_event (IBusEngine *engine, guint keyval,
                                                     guint keycode, guint modifiers);
 
-#define RETURN_KEYCODE 28 /* evdev KEY_ENTER */
 
 /* Applies what the voice state machine decided. Returns whether the key is consumed. */
 static gboolean
@@ -608,10 +607,6 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
   }
   if (a.commit) {
     ibus_engine_commit_text(engine, ibus_text_new_from_string(a.commit));
-  }
-  if (a.commit && a.send_return) {
-    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, 0);
-    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, IBUS_RELEASE_MASK);
   }
   if (a.notify) {
     ibus_rime_show_message(a.notify, NULL);

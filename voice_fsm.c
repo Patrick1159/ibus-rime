@@ -1,3 +1,4 @@
+#include <string.h>
 #include <ibus.h>
 #include "voice_fsm.h"
 
@@ -5,7 +6,7 @@
 #define COMMAND_MODS (IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_SUPER_MASK | IBUS_MOD4_MASK)
 
 static VoiceAction pass(gboolean consume) {
-  VoiceAction a = {consume, VOICE_CMD_NONE, NULL, NULL, NULL, FALSE, FALSE};
+  VoiceAction a = {consume, VOICE_CMD_NONE, NULL, NULL, NULL, FALSE};
   return a;
 }
 
@@ -49,22 +50,93 @@ static guint review_len(VoiceFsm *f) {
   return g_utf8_strlen(f->review->str, -1);
 }
 
-static const char *render_review(VoiceFsm *f) {
-  guint len = review_len(f);
-  guint start = 0, end = len;
-  if (len > VOICE_REVIEW_WINDOW) {
-    gint s = (gint)f->cursor - VOICE_REVIEW_WINDOW / 2;
-    start = (guint)CLAMP(s, 0, (gint)(len - VOICE_REVIEW_WINDOW));
-    end = start + VOICE_REVIEW_WINDOW;
+/* ---- review note layout ---- */
+
+static gboolean is_closing_punct(gunichar c) {
+  return g_utf8_strchr("，。、；：？！）》」』”’…,.;:?!)]}%", -1, c) != NULL;
+}
+
+static gboolean is_ascii_word(gunichar c) {
+  return c < 128 && g_ascii_isalnum((gchar)c);
+}
+
+static guint cols_of(gunichar c) {
+  return g_unichar_iswide(c) ? 2 : 1;
+}
+
+GPtrArray *voice_wrap(const char *text, guint cols) {
+  GPtrArray *lines = g_ptr_array_new_with_free_func(g_free);
+  GString *cur = g_string_new("");
+  guint cur_w = 0;
+  gsize run_start = 0; /* byte offset in cur of the trailing ASCII word */
+  guint run_w = 0;
+  for (const char *p = text; *p; p = g_utf8_next_char(p)) {
+    gunichar c = g_utf8_get_char(p);
+    guint w = cols_of(c);
+    if (cur->len && cur_w + w > cols && !is_closing_punct(c)) {
+      if (is_ascii_word(c) && run_w && run_start > 0 && run_w < cols / 2) {
+        /* move the unfinished ASCII word to the next line */
+        g_ptr_array_add(lines, g_strndup(cur->str, run_start));
+        g_string_erase(cur, 0, run_start);
+        cur_w = run_w;
+        run_start = 0;
+      } else {
+        g_ptr_array_add(lines, g_strdup(cur->str));
+        g_string_truncate(cur, 0);
+        cur_w = 0;
+        run_w = 0;
+        run_start = 0;
+      }
+    }
+    if (is_ascii_word(c)) {
+      if (!run_w) run_start = cur->len;
+      run_w += w;
+    } else {
+      run_w = 0;
+    }
+    g_string_append_unichar(cur, c);
+    cur_w += w;
   }
-  const char *text = f->review->str;
-  g_string_assign(f->aux, VOICE_REVIEW_PREFIX);
-  if (start > 0) g_string_append(f->aux, "…");
-  g_string_append_len(f->aux, text + byte_at(f, start), byte_at(f, f->cursor) - byte_at(f, start));
-  g_string_append(f->aux, VOICE_REVIEW_CURSOR);
-  g_string_append_len(f->aux, text + byte_at(f, f->cursor), byte_at(f, end) - byte_at(f, f->cursor));
-  if (end < len) g_string_append(f->aux, "…");
-  g_string_append(f->aux, VOICE_REVIEW_HINT);
+  g_ptr_array_add(lines, g_string_free(cur, FALSE));
+  return lines;
+}
+
+void voice_review_header(guint hotkey, GString *out) {
+  const char *label;
+  switch (hotkey) {
+  case IBUS_KEY_Alt_R: label = "右Alt"; break;
+  case IBUS_KEY_Control_R: label = "右Ctrl"; break;
+  case IBUS_KEY_Shift_R: label = "右Shift"; break;
+  default: label = ibus_keyval_name(hotkey); break;
+  }
+  g_string_append_printf(out, VOICE_REVIEW_PREFIX "语音输入 · ⏎ 上屏 · Esc 放弃 · %s 续说",
+                         label ? label : "热键");
+}
+
+static const char *render_review(VoiceFsm *f) {
+  GString *body = g_string_new(f->review->str);
+  g_string_insert(body, byte_at(f, f->cursor), VOICE_REVIEW_CURSOR);
+  GPtrArray *lines = voice_wrap(body->str, VOICE_REVIEW_COLS);
+  guint cursor_line = 0;
+  for (guint i = 0; i < lines->len; ++i) {
+    if (strstr(lines->pdata[i], VOICE_REVIEW_CURSOR)) cursor_line = i;
+  }
+  guint first = 0, last = lines->len;
+  if (lines->len > VOICE_REVIEW_MAX_LINES) {
+    gint s = (gint)cursor_line - VOICE_REVIEW_MAX_LINES / 2;
+    first = (guint)CLAMP(s, 0, (gint)(lines->len - VOICE_REVIEW_MAX_LINES));
+    last = first + VOICE_REVIEW_MAX_LINES;
+  }
+  g_string_truncate(f->aux, 0);
+  voice_review_header(f->hotkey, f->aux);
+  if (first > 0) g_string_append(f->aux, "\n" VOICE_REVIEW_MORE);
+  for (guint i = first; i < last; ++i) {
+    g_string_append_c(f->aux, '\n');
+    g_string_append(f->aux, lines->pdata[i]);
+  }
+  if (last < lines->len) g_string_append(f->aux, "\n" VOICE_REVIEW_MORE);
+  g_ptr_array_unref(lines);
+  g_string_free(body, TRUE);
   return f->aux->str;
 }
 
@@ -121,12 +193,11 @@ static VoiceAction leave_session(VoiceFsm *f, VoiceCmd send, const char *notify,
   return a;
 }
 
-static VoiceAction finish_review(VoiceFsm *f, gboolean commit, gboolean send_return) {
+static VoiceAction finish_review(VoiceFsm *f, gboolean commit) {
   VoiceAction a = pass(TRUE);
   if (commit) {
     g_string_assign(f->commit_buf, f->review->str);
     a.commit = f->commit_buf->len ? f->commit_buf->str : NULL;
-    a.send_return = send_return && a.commit;
   }
   review_reset(f);
   f->state = VOICE_IDLE;
@@ -156,9 +227,9 @@ static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboole
   switch (keyval) {
   case IBUS_KEY_Return:
   case IBUS_KEY_KP_Enter:
-    return finish_review(f, TRUE, !(modifiers & IBUS_SHIFT_MASK));
+    return finish_review(f, TRUE);
   case IBUS_KEY_Escape:
-    return finish_review(f, FALSE, FALSE);
+    return finish_review(f, FALSE);
   case IBUS_KEY_Left:
     if (f->cursor > 0) f->cursor--;
     break;

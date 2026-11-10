@@ -17,7 +17,6 @@ typedef struct {
   const char *commit;   /* NULL: nothing to commit (owned by the fsm) */
   const char *notify;   /* NULL: no desktop notification */
   gboolean replay;      /* after commit, replay voice_fsm_queued() keys in order */
-  gboolean send_return; /* after commit, forward a Return press+release to the application */
 } VoiceAction;
 
 typedef struct { guint keyval, keycode, modifiers; } VoiceKey;
@@ -41,10 +40,14 @@ typedef struct {
 #define VOICE_AUX_FINALIZING "⏳ 识别中…"
 #define VOICE_AUX_PARTIAL_RECORDING "🎤 "
 #define VOICE_AUX_PARTIAL_FINALIZING "⏳ "
+/* Review note: a header line, then the text wrapped to VOICE_REVIEW_COLS display columns
+ * (CJK = 2), at most VOICE_REVIEW_MAX_LINES lines around the cursor; a VOICE_REVIEW_MORE
+ * line marks hidden lines above/below. */
 #define VOICE_REVIEW_PREFIX "📝 "
 #define VOICE_REVIEW_CURSOR "‸"
-#define VOICE_REVIEW_HINT "  ⏎发送 ⇧⏎上屏 Esc放弃"
-#define VOICE_REVIEW_WINDOW 40 /* characters of review text shown around the cursor */
+#define VOICE_REVIEW_MORE "⋯"
+#define VOICE_REVIEW_COLS 36
+#define VOICE_REVIEW_MAX_LINES 6
 #define VOICE_NOTIFY_FOCUS_LOST "语音输入已取消（焦点切走）"
 #define VOICE_NOTIFY_DISCONNECTED "语音服务未运行或已断开"
 #define VOICE_NOTIFY_ERROR_PREFIX "语音识别出错："
@@ -65,6 +68,13 @@ VoiceAction voice_fsm_event(VoiceFsm *f, VoiceEvType type, const char *payload);
 VoiceAction voice_fsm_disconnected(VoiceFsm *f);
 VoiceAction voice_fsm_focus_out(VoiceFsm *f);
 VoiceAction voice_fsm_focus_in(VoiceFsm *f); /* re-shows the current aux text */
+
+/* Header line of the review note, e.g. "📝 语音输入 · ⏎ 上屏 · Esc 放弃 · 右Alt 续说". */
+void voice_review_header(guint hotkey, GString *out);
+/* Wrap text to cols display columns: a line never starts with closing punctuation (it may
+ * overflow by one character instead), and an ASCII word shorter than cols/2 is moved whole to
+ * the next line. Returns newly allocated strings (free with g_ptr_array_unref). */
+GPtrArray *voice_wrap(const char *text, guint cols);
 
 const VoiceKey *voice_fsm_queued(VoiceFsm *f, guint *n_out);
 void voice_fsm_drop_queue(VoiceFsm *f);

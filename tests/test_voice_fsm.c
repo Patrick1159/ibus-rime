@@ -398,6 +398,21 @@ static void left_n(VoiceFsm *f, guint n) {
   }
 }
 
+/* header line + "\n" + body (short bodies fit on one line) */
+static char *note(const char *body) {
+  GString *g = g_string_new("");
+  voice_review_header(IBUS_KEY_Alt_R, g);
+  g_string_append_c(g, '\n');
+  g_string_append(g, body);
+  return g_string_free(g, FALSE);
+}
+
+static void assert_note(const char *aux, const char *body) {
+  char *want = note(body);
+  g_assert_cmpstr(aux, ==, want);
+  g_free(want);
+}
+
 static void assert_review(VoiceFsm *f, const char *text, guint cursor) {
   g_assert_cmpint(f->state, ==, VOICE_REVIEW);
   g_assert_cmpstr(f->review->str, ==, text);
@@ -411,8 +426,7 @@ static void test_final_enters_review(void) {
   VoiceAction a = voice_fsm_event(&f, VOICE_EV_FINAL, "你好世界");
   g_assert_null(a.commit);
   assert_review(&f, "你好世界", 4);
-  g_assert_cmpstr(a.aux, ==,
-                  VOICE_REVIEW_PREFIX "你好世界" VOICE_REVIEW_CURSOR VOICE_REVIEW_HINT);
+  assert_note(a.aux, "你好世界" VOICE_REVIEW_CURSOR);
   voice_fsm_clear(&f);
 }
 
@@ -476,14 +490,13 @@ static void test_review_backspace_delete(void) {
   voice_fsm_clear(&f);
 }
 
-static void test_review_enter_commits_and_sends(void) {
+static void test_review_enter_commits(void) {
   VoiceFsm f;
   voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
   enter_review(&f, "你好世界");
   VoiceAction a = press(&f, IBUS_KEY_Return, KEYCODE_RETURN, 0);
   g_assert_true(a.consume);
   g_assert_cmpstr(a.commit, ==, "你好世界");
-  g_assert_true(a.send_return);
   g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   g_assert_cmpuint(f.review->len, ==, 0);
@@ -494,21 +507,19 @@ static void test_review_enter_commits_and_sends(void) {
   a = press(&f, IBUS_KEY_KP_Enter, KEYCODE_KPENTER, 0);
   g_assert_true(a.consume);
   g_assert_cmpstr(a.commit, ==, "你好世界");
-  g_assert_true(a.send_return);
   g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   g_assert_cmpuint(f.review->len, ==, 0);
   voice_fsm_clear(&f);
 }
 
-static void test_review_shift_enter_commits_only(void) {
+static void test_review_shift_enter_commits_too(void) {
   VoiceFsm f;
   voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
   enter_review(&f, "你好世界");
   VoiceAction a = press(&f, IBUS_KEY_Return, KEYCODE_RETURN, IBUS_SHIFT_MASK);
   g_assert_true(a.consume);
   g_assert_cmpstr(a.commit, ==, "你好世界");
-  g_assert_false(a.send_return);
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   voice_fsm_clear(&f);
 }
@@ -520,7 +531,6 @@ static void test_review_escape_discards(void) {
   VoiceAction a = rkey(&f, IBUS_KEY_Escape, KEYCODE_ESC);
   g_assert_true(a.consume);
   g_assert_null(a.commit);
-  g_assert_false(a.send_return);
   g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   voice_fsm_clear(&f);
@@ -562,8 +572,7 @@ static void test_review_insert_at_cursor(void) {
   VoiceAction a = voice_fsm_insert(&f, "美丽的");
   assert_review(&f, "你好美丽的世界", 5);
   g_assert_null(a.commit);
-  g_assert_cmpstr(a.aux, ==,
-                  VOICE_REVIEW_PREFIX "你好美丽的" VOICE_REVIEW_CURSOR "世界" VOICE_REVIEW_HINT);
+  assert_note(a.aux, "你好美丽的" VOICE_REVIEW_CURSOR "世界");
   voice_fsm_clear(&f);
 }
 
@@ -697,8 +706,7 @@ static void test_review_survives_focus_change(void) {
   g_assert_null(a.notify);
   assert_review(&f, "你好世界", 4);
   a = voice_fsm_focus_in(&f);
-  g_assert_cmpstr(a.aux, ==,
-                  VOICE_REVIEW_PREFIX "你好世界" VOICE_REVIEW_CURSOR VOICE_REVIEW_HINT);
+  assert_note(a.aux, "你好世界" VOICE_REVIEW_CURSOR);
   assert_review(&f, "你好世界", 4);
   voice_fsm_clear(&f);
 }
@@ -712,36 +720,102 @@ static void test_focus_in_idle_is_noop(void) {
   voice_fsm_clear(&f);
 }
 
-static void test_review_long_text_window(void) {
+static GPtrArray *wrap(const char *t, guint cols) { return voice_wrap(t, cols); }
+
+static void test_wrap_breaks_by_columns(void) {
+  GString *t = g_string_new("");
+  for (int i = 0; i < 40; i++) g_string_append(t, "中");
+  GPtrArray *l = wrap(t->str, 36);
+  g_assert_cmpuint(l->len, ==, 3);
+  g_assert_cmpuint(g_utf8_strlen(l->pdata[0], -1), ==, 18);
+  g_assert_cmpuint(g_utf8_strlen(l->pdata[1], -1), ==, 18);
+  g_assert_cmpuint(g_utf8_strlen(l->pdata[2], -1), ==, 4);
+  g_ptr_array_unref(l);
+  g_string_free(t, TRUE);
+}
+
+static void test_wrap_short_is_one_line(void) {
+  GPtrArray *l = wrap("你好 world", 36);
+  g_assert_cmpuint(l->len, ==, 1);
+  g_assert_cmpstr(l->pdata[0], ==, "你好 world");
+  g_ptr_array_unref(l);
+  l = wrap("", 36);
+  g_assert_cmpuint(l->len, ==, 1);
+  g_assert_cmpstr(l->pdata[0], ==, "");
+  g_ptr_array_unref(l);
+}
+
+static void test_wrap_no_line_starts_with_punct(void) {
+  GString *t = g_string_new("");
+  for (int i = 0; i < 18; i++) g_string_append(t, "中");
+  g_string_append(t, "，好");
+  GPtrArray *l = wrap(t->str, 36);
+  g_assert_cmpuint(l->len, ==, 2);
+  g_assert_true(g_str_has_suffix(l->pdata[0], "中，"));
+  g_assert_cmpstr(l->pdata[1], ==, "好");
+  g_ptr_array_unref(l);
+  g_string_free(t, TRUE);
+}
+
+static void test_wrap_keeps_short_ascii_word(void) {
+  GString *t = g_string_new("");
+  for (int i = 0; i < 16; i++) g_string_append(t, "中");
+  g_string_append(t, "hello");
+  GPtrArray *l = wrap(t->str, 36);
+  g_assert_cmpuint(l->len, ==, 2);
+  g_assert_cmpuint(g_utf8_strlen(l->pdata[0], -1), ==, 16);
+  g_assert_cmpstr(l->pdata[1], ==, "hello");
+  g_ptr_array_unref(l);
+  g_string_free(t, TRUE);
+}
+
+static void test_wrap_long_ascii_run_hard_breaks(void) {
+  char t[81];
+  memset(t, 'a', 80);
+  t[80] = 0;
+  GPtrArray *l = wrap(t, 36);
+  g_assert_cmpuint(l->len, ==, 3);
+  g_assert_cmpuint(strlen(l->pdata[0]), ==, 36);
+  g_assert_cmpuint(strlen(l->pdata[1]), ==, 36);
+  g_assert_cmpuint(strlen(l->pdata[2]), ==, 8);
+  g_ptr_array_unref(l);
+}
+
+static void test_review_header_names_hotkey(void) {
+  GString *g = g_string_new("");
+  voice_review_header(IBUS_KEY_Alt_R, g);
+  g_assert_true(g_str_has_prefix(g->str, VOICE_REVIEW_PREFIX));
+  g_assert_nonnull(strstr(g->str, "右Alt"));
+  g_assert_nonnull(strstr(g->str, "上屏"));
+  g_assert_null(strstr(g->str, "发送"));
+  g_assert_null(strchr(g->str, '\n'));
+  g_string_truncate(g, 0);
+  voice_review_header(IBUS_KEY_F9, g);
+  g_assert_nonnull(strstr(g->str, "F9"));
+  g_string_free(g, TRUE);
+}
+
+static void test_review_note_wraps_and_windows(void) {
   VoiceFsm f;
   voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
-  const char *t = "01234567890123456789012345678901234567890123456789"
-                  "01234567890123456789012345678901234567890123456789";
-  g_assert_cmpuint(strlen(t), ==, 100);
-  g_assert_cmpint(VOICE_REVIEW_WINDOW, ==, 40);
-  enter_review(&f, t);
-  g_assert_cmpuint(f.cursor, ==, 100);
-  for (int i = 0; i < 50; i++)
-    rkey(&f, IBUS_KEY_Left, KEYCODE_LEFT);
-  g_assert_cmpuint(f.cursor, ==, 50);
-  VoiceAction a = voice_fsm_focus_in(&f);
-  char *before = g_strndup(t + 30, 20);
-  char *after = g_strndup(t + 50, 20);
-  char *want = g_strconcat(VOICE_REVIEW_PREFIX "…", before, VOICE_REVIEW_CURSOR, after,
-                           "…" VOICE_REVIEW_HINT, NULL);
-  g_assert_cmpstr(a.aux, ==, want);
-  g_free(want);
-  g_free(before);
-  g_free(after);
+  GString *t = g_string_new("");
+  for (int i = 0; i < 200; i++) g_string_append(t, "中");   /* 12 lines of 18 */
+  enter_review(&f, t->str);
+  VoiceAction a = voice_fsm_focus_in(&f);                     /* cursor at the end */
+  gchar **lines = g_strsplit(a.aux, "\n", -1);
+  /* header, "⋯", 6 body lines; the cursor line is the last one */
+  g_assert_cmpuint(g_strv_length(lines), ==, 1 + 1 + VOICE_REVIEW_MAX_LINES);
+  g_assert_cmpstr(lines[1], ==, VOICE_REVIEW_MORE);
+  g_assert_true(g_str_has_suffix(lines[1 + VOICE_REVIEW_MAX_LINES], VOICE_REVIEW_CURSOR));
+  g_strfreev(lines);
 
   a = rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
-  g_assert_cmpuint(f.cursor, ==, 0);
-  after = g_strndup(t, 40);
-  want = g_strconcat(VOICE_REVIEW_PREFIX VOICE_REVIEW_CURSOR, after, "…" VOICE_REVIEW_HINT,
-                     NULL);
-  g_assert_cmpstr(a.aux, ==, want);
-  g_free(want);
-  g_free(after);
+  lines = g_strsplit(a.aux, "\n", -1);
+  g_assert_cmpuint(g_strv_length(lines), ==, 1 + VOICE_REVIEW_MAX_LINES + 1);
+  g_assert_true(g_str_has_prefix(lines[1], VOICE_REVIEW_CURSOR "中"));
+  g_assert_cmpstr(lines[1 + VOICE_REVIEW_MAX_LINES], ==, VOICE_REVIEW_MORE);
+  g_strfreev(lines);
+  g_string_free(t, TRUE);
   voice_fsm_clear(&f);
 }
 
@@ -790,8 +864,8 @@ int main(int argc, char **argv) {
   g_test_add_func("/voice_fsm/review_empty_final_goes_idle", test_review_empty_final_goes_idle);
   g_test_add_func("/voice_fsm/review_cursor_moves", test_review_cursor_moves);
   g_test_add_func("/voice_fsm/review_backspace_delete", test_review_backspace_delete);
-  g_test_add_func("/voice_fsm/review_enter_commits_and_sends", test_review_enter_commits_and_sends);
-  g_test_add_func("/voice_fsm/review_shift_enter_commits_only", test_review_shift_enter_commits_only);
+  g_test_add_func("/voice_fsm/review_enter_commits", test_review_enter_commits);
+  g_test_add_func("/voice_fsm/review_shift_enter_commits_too", test_review_shift_enter_commits_too);
   g_test_add_func("/voice_fsm/review_escape_discards", test_review_escape_discards);
   g_test_add_func("/voice_fsm/review_composing_passes_everything", test_review_composing_passes_everything);
   g_test_add_func("/voice_fsm/review_insert_at_cursor", test_review_insert_at_cursor);
@@ -801,7 +875,13 @@ int main(int argc, char **argv) {
   g_test_add_func("/voice_fsm/review_resume_cancel_returns_to_review", test_review_resume_cancel_returns_to_review);
   g_test_add_func("/voice_fsm/review_survives_focus_change", test_review_survives_focus_change);
   g_test_add_func("/voice_fsm/focus_in_idle_is_noop", test_focus_in_idle_is_noop);
-  g_test_add_func("/voice_fsm/review_long_text_window", test_review_long_text_window);
+  g_test_add_func("/voice_fsm/wrap_breaks_by_columns", test_wrap_breaks_by_columns);
+  g_test_add_func("/voice_fsm/wrap_short_is_one_line", test_wrap_short_is_one_line);
+  g_test_add_func("/voice_fsm/wrap_no_line_starts_with_punct", test_wrap_no_line_starts_with_punct);
+  g_test_add_func("/voice_fsm/wrap_keeps_short_ascii_word", test_wrap_keeps_short_ascii_word);
+  g_test_add_func("/voice_fsm/wrap_long_ascii_run_hard_breaks", test_wrap_long_ascii_run_hard_breaks);
+  g_test_add_func("/voice_fsm/review_header_names_hotkey", test_review_header_names_hotkey);
+  g_test_add_func("/voice_fsm/review_note_wraps_and_windows", test_review_note_wraps_and_windows);
   g_test_add_func("/voice_fsm/keys_queued_while_finalizing_replay_into_review", test_keys_queued_while_finalizing_replay_into_review);
   return g_test_run();
 }
