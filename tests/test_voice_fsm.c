@@ -400,14 +400,14 @@ static void left_n(VoiceFsm *f, guint n) {
   }
 }
 
-/* In REVIEW the aux text is only the header line. */
+/* In REVIEW the aux text is only the header block (hint line + rule). */
 static void assert_header(const char *aux) {
   GString *g = g_string_new("");
   voice_review_header(IBUS_KEY_Alt_R, g);
   g_assert_nonnull(aux);
   g_assert_cmpstr(aux, ==, g->str);
   g_assert_true(g_str_has_prefix(aux, VOICE_REVIEW_PREFIX));
-  g_assert_null(strchr(aux, '\n'));
+  g_assert_true(g_str_has_suffix(aux, "\n" VOICE_REVIEW_RULE));
   g_string_free(g, TRUE);
 }
 
@@ -545,6 +545,37 @@ static void test_review_shift_enter_commits_too(void) {
   g_assert_true(a.consume);
   g_assert_cmpstr(a.commit, ==, "你好世界");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_enter_sends_when_enabled(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  f.enter_sends = TRUE;
+  enter_review(&f, "你好世界");
+  VoiceAction a = press(&f, IBUS_KEY_Return, KEYCODE_RETURN, 0);
+  g_assert_cmpstr(a.commit, ==, "你好世界");
+  g_assert_true(a.send_return);
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  voice_fsm_clear(&f);
+
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  f.enter_sends = TRUE;
+  enter_review(&f, "你好世界");
+  a = press(&f, IBUS_KEY_Return, KEYCODE_RETURN, IBUS_SHIFT_MASK);
+  g_assert_cmpstr(a.commit, ==, "你好世界");
+  g_assert_false(a.send_return);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_enter_does_not_send_by_default(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  g_assert_false(f.enter_sends);
+  enter_review(&f, "你好世界");
+  VoiceAction a = press(&f, IBUS_KEY_Return, KEYCODE_RETURN, 0);
+  g_assert_cmpstr(a.commit, ==, "你好世界");
+  g_assert_false(a.send_return);
   voice_fsm_clear(&f);
 }
 
@@ -842,60 +873,67 @@ static void test_cursor_marker_is_narrow(void) {
   g_assert_false(g_unichar_iswide_cjk(c));   /* must not take a full CJK cell */
 }
 
+static void check_header_block(const GString *g) {
+  const char *nl = strchr(g->str, '\n');
+  g_assert_nonnull(nl);
+  g_assert_null(strchr(nl + 1, '\n'));            /* exactly one newline */
+  char *first = g_strndup(g->str, nl - g->str);
+  g_assert_true(g_str_has_prefix(first, VOICE_REVIEW_PREFIX));
+  g_assert_nonnull(strstr(first, "语音草稿"));
+  g_assert_nonnull(strstr(first, "上屏"));
+  g_assert_nonnull(strstr(first, "放弃"));
+  g_assert_null(strstr(first, "发送"));
+  g_assert_cmpstr(nl + 1, ==, VOICE_REVIEW_RULE);
+  g_free(first);
+}
+
 static void test_review_header_names_hotkey(void) {
   GString *g = g_string_new("");
   voice_review_header(IBUS_KEY_Alt_R, g);
-  g_assert_true(g_str_has_prefix(g->str, VOICE_REVIEW_PREFIX));
+  check_header_block(g);
   g_assert_nonnull(strstr(g->str, "右Alt"));
-  g_assert_nonnull(strstr(g->str, "上屏"));
-  g_assert_null(strstr(g->str, "发送"));
-  g_assert_nonnull(strstr(g->str, "放弃"));
-  g_assert_nonnull(strstr(g->str, "语音草稿"));
-  g_assert_null(strchr(g->str, '\n'));
   g_string_truncate(g, 0);
   voice_review_header(IBUS_KEY_F9, g);
+  check_header_block(g);
   g_assert_nonnull(strstr(g->str, "F9"));
-  g_assert_nonnull(strstr(g->str, "语音草稿"));
-  g_assert_nonnull(strstr(g->str, "上屏"));
-  g_assert_null(strstr(g->str, "发送"));
-  g_assert_null(strchr(g->str, '\n'));
   g_string_free(g, TRUE);
 }
 
+/* 200 x "中" at 60 cols: rows of 30 -> 6 x 30 + 20 = 7 rows, window of 6, no marker rows. */
 static void test_review_note_wraps_and_windows(void) {
   VoiceFsm f;
   voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
   GString *t = g_string_new("");
-  for (int i = 0; i < 200; i++) g_string_append(t, "中");   /* 11 rows of 18 + 2, marker in the 12th */
+  for (int i = 0; i < 200; i++) g_string_append(t, "中");
   enter_review(&f, t->str);
   VoiceAction a = voice_fsm_focus_in(&f);                     /* cursor at the end */
   assert_header(a.aux);
   g_assert_true(a.note);
   gint cr = -2;
   GPtrArray *rows = voice_fsm_note(&f, &cr);
-  /* "⋯", then the last 6 rows; the cursor row is the last one */
-  g_assert_cmpuint(rows->len, ==, 1 + VOICE_REVIEW_MAX_LINES);
-  g_assert_cmpstr(rows->pdata[0], ==, VOICE_REVIEW_MORE);
-  g_assert_cmpint(cr, ==, VOICE_REVIEW_MAX_LINES);
+  /* rows 1..6 of 7; the cursor row is the last one */
+  g_assert_cmpuint(rows->len, ==, VOICE_REVIEW_MAX_LINES);
+  g_assert_cmpint(cr, ==, VOICE_REVIEW_MAX_LINES - 1);
   g_assert_true(g_str_has_suffix(rows->pdata[cr], VOICE_REVIEW_CURSOR));
+  for (guint i = 0; i < rows->len; i++)
+    g_assert_null(strstr(rows->pdata[i], "⋯"));
 
   a = rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
   g_assert_true(a.note);
   rows = voice_fsm_note(&f, &cr);
-  g_assert_cmpuint(rows->len, ==, VOICE_REVIEW_MAX_LINES + 1);
+  g_assert_cmpuint(rows->len, ==, VOICE_REVIEW_MAX_LINES);   /* rows 0..5 */
   g_assert_true(g_str_has_prefix(rows->pdata[0], VOICE_REVIEW_CURSOR "中"));
-  g_assert_cmpstr(rows->pdata[VOICE_REVIEW_MAX_LINES], ==, VOICE_REVIEW_MORE);
   g_assert_cmpint(cr, ==, 0);
   g_string_free(t, TRUE);
   voice_fsm_clear(&f);
 }
 
-/* Cursor in the middle: rows hidden both above and below. */
+/* Cursor in the middle of 20 rows: window is exactly 6 rows, first = clamp(5 - 3, 0, 14) = 2. */
 static void test_review_note_window_middle(void) {
   VoiceFsm f;
   voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
   GString *t = g_string_new("");
-  for (int i = 0; i < 200; i++) g_string_append(t, "中");
+  for (int i = 0; i < 600; i++) g_string_append(t, "中");
   enter_review(&f, t->str);
   rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
   for (int i = 0; i < 5; i++) {
@@ -903,66 +941,138 @@ static void test_review_note_window_middle(void) {
     g_assert_true(a.consume);
     g_assert_true(a.note);
   }
-  /* cursor is on full row 5, so rows 2..7 are shown: first = clamp(5 - 3, 0, n - 6) */
   gint cr = -2;
   GPtrArray *rows = voice_fsm_note(&f, &cr);
-  g_assert_cmpuint(rows->len, ==, 1 + VOICE_REVIEW_MAX_LINES + 1);
-  g_assert_cmpstr(rows->pdata[0], ==, VOICE_REVIEW_MORE);
-  g_assert_cmpstr(rows->pdata[VOICE_REVIEW_MAX_LINES + 1], ==, VOICE_REVIEW_MORE);
-  g_assert_cmpint(cr, ==, 4);
-  g_assert_nonnull(strstr(rows->pdata[cr], VOICE_REVIEW_CURSOR));
+  g_assert_cmpuint(rows->len, ==, VOICE_REVIEW_MAX_LINES);
+  g_assert_cmpint(cr, ==, 3);
+  g_assert_true(g_str_has_prefix(rows->pdata[cr], VOICE_REVIEW_CURSOR "中"));
+  for (guint i = 0; i < rows->len; i++)
+    if ((gint)i != cr) g_assert_null(strstr(rows->pdata[i], VOICE_REVIEW_CURSOR));
   g_string_free(t, TRUE);
   voice_fsm_clear(&f);
 }
 
-/* 40 distinct characters; at cols 36 the rows of the plain text are
- * [0..17] [18..35] [36..39]; the marker takes no wrap width, so rows do not shift as the
- * cursor moves. */
+static GString *cjk_text(guint n) {
+  GString *t = g_string_new("");
+  for (guint i = 0; i < n; i++) g_string_append(t, "中");
+  return t;
+}
+
+/* Labels must be one per row; compare with the expected thumb range [lo, hi). */
+static void assert_labels(VoiceFsm *f, guint lo, guint hi) {
+  gint cr_;
+  GPtrArray *rows = voice_fsm_note(f, &cr_);
+  GPtrArray *labels = voice_fsm_note_labels(f);
+  g_assert_nonnull(labels);
+  g_assert_cmpuint(labels->len, ==, rows->len);
+  for (guint i = 0; i < labels->len; i++)
+    g_assert_cmpstr(labels->pdata[i], ==, (i >= lo && i < hi) ? VOICE_SCROLL_THUMB : VOICE_SCROLL_TRACK);
+}
+
+static void test_scrollbar_absent_when_fits(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  GPtrArray *labels = voice_fsm_note_labels(&f);
+  g_assert_nonnull(labels);
+  g_assert_cmpuint(labels->len, ==, 1);
+  g_assert_cmpstr(labels->pdata[0], ==, VOICE_SCROLL_NONE);
+  voice_fsm_clear(&f);
+}
+
+/* 600 x "中" = 20 rows of 30; n = 20, v = 6, thumb len = round(36/20) = 2. */
+static void test_scrollbar_thumb_at_bottom_and_top(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  GString *t = cjk_text(600);
+  enter_review(&f, t->str);
+  gint cr = -2;
+  GPtrArray *rows = voice_fsm_note(&f, &cr);
+  g_assert_cmpuint(rows->len, ==, VOICE_REVIEW_MAX_LINES);
+  g_assert_cmpint(cr, ==, 5);
+  /* cursor at end: first = 14, thumb start = round(14 * 4 / 14) = 4 */
+  assert_labels(&f, 4, 6);
+  rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
+  rows = voice_fsm_note(&f, &cr);
+  g_assert_cmpuint(rows->len, ==, VOICE_REVIEW_MAX_LINES);
+  g_assert_cmpint(cr, ==, 0);
+  assert_labels(&f, 0, 2);
+  g_string_free(t, TRUE);
+  voice_fsm_clear(&f);
+}
+
+static void test_scrollbar_thumb_in_middle(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  GString *t = cjk_text(600);
+  enter_review(&f, t->str);
+  rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
+  for (int i = 0; i < 10; i++) rkey(&f, IBUS_KEY_Down, KEYCODE_DOWN);
+  /* cursor line 10: first = 7, thumb start = round(7 * 4 / 14) = 2 */
+  gint cr = -2;
+  GPtrArray *rows = voice_fsm_note(&f, &cr);
+  g_assert_cmpuint(rows->len, ==, VOICE_REVIEW_MAX_LINES);
+  g_assert_cmpint(cr, ==, 3);
+  assert_labels(&f, 2, 4);
+  g_string_free(t, TRUE);
+  voice_fsm_clear(&f);
+}
+
+static void test_note_labels_empty_outside_review(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  GPtrArray *labels = voice_fsm_note_labels(&f);
+  g_assert_nonnull(labels);
+  g_assert_cmpuint(labels->len, ==, 0);
+  voice_fsm_clear(&f);
+}
+
+/* 70 characters; at 60 cols the rows of the plain text are [0..29] [30..59] [60..69]; the
+ * marker takes no wrap width, so rows do not shift as the cursor moves. */
 static void test_review_up_down_moves_by_row(void) {
   VoiceFsm f;
   voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
   GString *t = g_string_new("");
-  for (int i = 0; i < 4; i++) g_string_append(t, "一二三四五六七八九十");
+  for (int i = 0; i < 7; i++) g_string_append(t, "一二三四五六七八九十");
   enter_review(&f, t->str);
-  assert_review(&f, t->str, 40);
+  assert_review(&f, t->str, 70);
   gint cr = -2;
   GPtrArray *rows = voice_fsm_note(&f, &cr);
   g_assert_cmpuint(rows->len, ==, 3);
   g_assert_cmpint(cr, ==, 2);
-  g_assert_cmpstr(rows->pdata[2], ==, "七八九十" VOICE_REVIEW_CURSOR);
+  g_assert_cmpstr(rows->pdata[2], ==, "一二三四五六七八九十" VOICE_REVIEW_CURSOR);
 
-  /* offset 4 in row 2 -> row 1 starts at char 18 -> 22 */
+  /* offset 10 in row 2 -> row 1 starts at char 30 -> 40 */
   VoiceAction a = rkey(&f, IBUS_KEY_Up, KEYCODE_UP);
   g_assert_true(a.consume);
   g_assert_true(a.note);
-  assert_review(&f, t->str, 22);
+  assert_review(&f, t->str, 40);
   voice_fsm_note(&f, &cr);
   g_assert_cmpint(cr, ==, 1);
-  /* offset 4 in row 1 -> row 0 -> 4 */
+  /* offset 10 in row 1 -> row 0 -> 10 */
   a = rkey(&f, IBUS_KEY_Up, KEYCODE_UP);
   g_assert_true(a.consume);
   g_assert_true(a.note);
-  assert_review(&f, t->str, 4);
+  assert_review(&f, t->str, 10);
   voice_fsm_note(&f, &cr);
   g_assert_cmpint(cr, ==, 0);
   /* first row: no-op */
   a = rkey(&f, IBUS_KEY_Up, KEYCODE_UP);
   g_assert_true(a.consume);
-  assert_review(&f, t->str, 4);
-  /* Rows are measured on the plain text (the marker takes no wrap width), so they stay
-   * [0..17] [18..35] [36..39]: Down from 4 -> 22, Down -> 40 (clamped to row 2's length). */
-  a = rkey(&f, IBUS_KEY_Down, KEYCODE_DOWN);
-  g_assert_true(a.consume);
-  g_assert_true(a.note);
-  assert_review(&f, t->str, 22);
+  assert_review(&f, t->str, 10);
+  /* Down from 10 -> 40, Down -> 70 (row 2 has 10 chars, offset 10 is its end). */
   a = rkey(&f, IBUS_KEY_Down, KEYCODE_DOWN);
   g_assert_true(a.consume);
   g_assert_true(a.note);
   assert_review(&f, t->str, 40);
+  a = rkey(&f, IBUS_KEY_Down, KEYCODE_DOWN);
+  g_assert_true(a.consume);
+  g_assert_true(a.note);
+  assert_review(&f, t->str, 70);
   /* last row: no-op */
   a = rkey(&f, IBUS_KEY_Down, KEYCODE_DOWN);
   g_assert_true(a.consume);
-  assert_review(&f, t->str, 40);
+  assert_review(&f, t->str, 70);
   voice_fsm_note(&f, &cr);
   g_assert_cmpint(cr, ==, 2);
   g_string_free(t, TRUE);
@@ -1074,6 +1184,8 @@ int main(int argc, char **argv) {
   g_test_add_func("/voice_fsm/review_backspace_delete", test_review_backspace_delete);
   g_test_add_func("/voice_fsm/review_enter_commits", test_review_enter_commits);
   g_test_add_func("/voice_fsm/review_shift_enter_commits_too", test_review_shift_enter_commits_too);
+  g_test_add_func("/voice_fsm/review_enter_sends_when_enabled", test_review_enter_sends_when_enabled);
+  g_test_add_func("/voice_fsm/review_enter_does_not_send_by_default", test_review_enter_does_not_send_by_default);
   g_test_add_func("/voice_fsm/review_escape_discards", test_review_escape_discards);
   g_test_add_func("/voice_fsm/review_composing_passes_everything", test_review_composing_passes_everything);
   g_test_add_func("/voice_fsm/review_insert_at_cursor", test_review_insert_at_cursor);
@@ -1098,6 +1210,10 @@ int main(int argc, char **argv) {
   g_test_add_func("/voice_fsm/review_up_down_single_row_noop", test_review_up_down_single_row_noop);
   g_test_add_func("/voice_fsm/compose_hint_shows_cursor_row", test_compose_hint_shows_cursor_row);
   g_test_add_func("/voice_fsm/note_empty_outside_review", test_note_empty_outside_review);
+  g_test_add_func("/voice_fsm/scrollbar_absent_when_fits", test_scrollbar_absent_when_fits);
+  g_test_add_func("/voice_fsm/scrollbar_thumb_at_bottom_and_top", test_scrollbar_thumb_at_bottom_and_top);
+  g_test_add_func("/voice_fsm/scrollbar_thumb_in_middle", test_scrollbar_thumb_in_middle);
+  g_test_add_func("/voice_fsm/note_labels_empty_outside_review", test_note_labels_empty_outside_review);
   g_test_add_func("/voice_fsm/keys_queued_while_finalizing_replay_into_review", test_keys_queued_while_finalizing_replay_into_review);
   return g_test_run();
 }

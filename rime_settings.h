@@ -32,6 +32,7 @@ struct IBusRimeSettings {
   struct ColorSchemeDefinition* color_scheme;
   guint voice_hotkey;
   gboolean voice_review;
+  gboolean voice_enter_sends;
 };
 
 extern struct IBusRimeSettings g_ibus_rime_settings;

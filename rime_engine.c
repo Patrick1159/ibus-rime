@@ -566,6 +566,8 @@ show_voice_aux (IBusEngine *engine, const char *text)
 
 static gboolean rime_is_composing (IBusRimeEngine *rime_engine);
 
+#define RETURN_KEYCODE 28 /* evdev KEY_ENTER */
+
 static void
 hide_voice_note (IBusRimeEngine *rime_engine)
 {
@@ -584,6 +586,7 @@ show_voice_note (IBusRimeEngine *rime_engine)
   IBusEngine *engine = (IBusEngine *)rime_engine;
   gint cursor_row = -1;
   GPtrArray *rows = voice_fsm_note(&rime_engine->voice, &cursor_row);
+  GPtrArray *labels = voice_fsm_note_labels(&rime_engine->voice);
   if (rows->len == 0) {
     hide_voice_note(rime_engine);
     return;
@@ -599,7 +602,7 @@ show_voice_note (IBusRimeEngine *rime_engine)
   ibus_lookup_table_set_orientation(t, IBUS_ORIENTATION_VERTICAL);
   for (guint i = 0; i < rows->len; ++i) {
     ibus_lookup_table_append_candidate(t, ibus_text_new_from_string(rows->pdata[i]));
-    ibus_lookup_table_set_label(t, i, ibus_text_new_from_static_string(" "));
+    ibus_lookup_table_set_label(t, i, ibus_text_new_from_string(labels->pdata[i]));
   }
   ibus_lookup_table_set_cursor_visible(t, cursor_row >= 0);
   if (cursor_row >= 0) {
@@ -669,6 +672,10 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
   if (a.commit) {
     ibus_engine_commit_text(engine, ibus_text_new_from_string(a.commit));
   }
+  if (a.commit && a.send_return) {  /* voice/enter_sends: "commit and send" */
+    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, 0);
+    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, IBUS_RELEASE_MASK);
+  }
   if (a.notify) {
     ibus_rime_show_message(a.notify, NULL);
   }
@@ -703,6 +710,7 @@ ibus_rime_engine_process_key_event (IBusEngine *engine,
   IBusRimeEngine *rime_engine = (IBusRimeEngine *)engine;
   rime_engine->voice.hotkey = g_ibus_rime_settings.voice_hotkey;
   rime_engine->voice.review_enabled = g_ibus_rime_settings.voice_review;
+  rime_engine->voice.enter_sends = g_ibus_rime_settings.voice_enter_sends;
   VoiceAction action = voice_fsm_key(&rime_engine->voice, keyval, keycode,
                                      modifiers, rime_is_composing(rime_engine));
   if (apply_voice_action(rime_engine, action)) {
