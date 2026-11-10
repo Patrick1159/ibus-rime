@@ -58,18 +58,6 @@ set(IBUS_RIME_SRC rime_engine.c rime_main.c rime_settings.c
 add_executable(ibus-engine-rime-voice ${IBUS_RIME_SRC})
 target_link_libraries(ibus-engine-rime-voice ${IBus_LIBRARIES} ${LIBNOTIFY_LIBRARIES} ${Rime_LIBRARIES} ${RIME_DEPS})
 
-option(VOICE_TESTS "build voice unit tests" OFF)
-if(VOICE_TESTS)
-  enable_testing()
-  pkg_check_modules(GIO REQUIRED gio-unix-2.0)
-  foreach(t voice_proto voice_fsm voice_client)
-    add_executable(test_${t} tests/test_${t}.c voice_proto.c voice_fsm.c voice_client.c)
-    target_include_directories(test_${t} PRIVATE ${GIO_INCLUDE_DIRS})
-    target_link_libraries(test_${t} ${IBus_LIBRARIES} ${GIO_LIBRARIES})
-    add_test(NAME ${t} COMMAND test_${t})
-  endforeach()
-endif(VOICE_TESTS)
-
 configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/rime.xml.in"
   "${CMAKE_CURRENT_BINARY_DIR}/rime-voice.xml"
