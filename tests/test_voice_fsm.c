@@ -52,7 +52,7 @@ static void queue_three_keys(VoiceFsm *f) {
 
 static void test_tap_starts_recording(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   VoiceAction a = voice_fsm_key(&f, IBUS_KEY_Alt_R, HOTKEY_CODE, 0, FALSE);
   g_assert_true(a.consume);
   g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
@@ -61,42 +61,49 @@ static void test_tap_starts_recording(void) {
   g_assert_true(a.consume);
   g_assert_cmpint(a.send, ==, VOICE_CMD_START);
   g_assert_cmpint(f.state, ==, VOICE_RECORDING);
-  g_assert_cmpstr(a.preedit, ==, VOICE_PREEDIT_RECORDING);
+  g_assert_cmpstr(a.aux, ==, VOICE_AUX_RECORDING);
   voice_fsm_clear(&f);
 }
 
-static void test_partial_updates_preedit(void) {
+static void test_partial_updates_aux(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_recording(&f);
   VoiceAction a = voice_fsm_event(&f, VOICE_EV_PARTIAL, "你好");
-  g_assert_cmpstr(a.preedit, ==, VOICE_PREEDIT_RECORDING "你好");
-  g_assert_cmpstr(a.preedit, ==, "🎤 你好");
+  g_assert_cmpstr(a.aux, ==, VOICE_AUX_PARTIAL_RECORDING "你好");
+  g_assert_cmpstr(a.aux, ==, "🎤 你好");
   g_assert_cmpint(f.state, ==, VOICE_RECORDING);
   voice_fsm_clear(&f);
 }
 
 static void test_second_tap_stops(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_recording(&f);
   voice_fsm_event(&f, VOICE_EV_PARTIAL, "你好");
   VoiceAction a = tap(&f, FALSE);
   g_assert_cmpint(a.send, ==, VOICE_CMD_STOP);
   g_assert_cmpint(f.state, ==, VOICE_FINALIZING);
-  g_assert_nonnull(a.preedit);
-  g_assert_true(g_str_has_prefix(a.preedit, VOICE_PREEDIT_FINALIZING));
-  g_assert_nonnull(strstr(a.preedit, "你好"));
+  g_assert_cmpstr(a.aux, ==, VOICE_AUX_PARTIAL_FINALIZING "你好");
+  g_assert_true(g_str_has_prefix(a.aux, "⏳"));
+  voice_fsm_clear(&f);
+
+  /* No partial yet: plain finalizing text. */
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
+  to_recording(&f);
+  a = tap(&f, FALSE);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_STOP);
+  g_assert_cmpstr(a.aux, ==, VOICE_AUX_FINALIZING);
   voice_fsm_clear(&f);
 }
 
 static void test_final_commits_and_idles(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_finalizing(&f, "你好");
   VoiceAction a = voice_fsm_event(&f, VOICE_EV_FINAL, "你好 world");
   g_assert_cmpstr(a.commit, ==, "你好 world");
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   g_assert_false(a.replay);
   voice_fsm_clear(&f);
@@ -104,22 +111,22 @@ static void test_final_commits_and_idles(void) {
 
 static void test_empty_final_commits_nothing(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_finalizing(&f, NULL);
   VoiceAction a = voice_fsm_event(&f, VOICE_EV_FINAL, "");
   g_assert_null(a.commit);
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   voice_fsm_clear(&f);
 }
 
 static void test_escape_cancels(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_recording(&f);
   VoiceAction a = press(&f, IBUS_KEY_Escape, KEYCODE_ESC, 0);
   g_assert_cmpint(a.send, ==, VOICE_CMD_CANCEL);
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   g_assert_true(a.consume);
   g_assert_false(a.replay);
@@ -131,7 +138,7 @@ static void test_escape_cancels(void) {
 
 static void test_other_keys_swallowed_while_recording(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_recording(&f);
   VoiceAction a = press(&f, IBUS_KEY_a, KEYCODE_A, 0);
   g_assert_true(a.consume);
@@ -148,7 +155,7 @@ static void test_other_keys_swallowed_while_recording(void) {
 
 static void test_keys_queued_while_finalizing(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_finalizing(&f, "x");
   queue_three_keys(&f);
   guint n = 0;
@@ -169,7 +176,7 @@ static void test_keys_queued_while_finalizing(void) {
 
 static void test_final_replays_queue(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_finalizing(&f, NULL);
   queue_three_keys(&f);
   VoiceAction a = voice_fsm_event(&f, VOICE_EV_FINAL, "x");
@@ -190,7 +197,7 @@ static void test_final_replays_queue(void) {
 
 static void test_err_and_disconnect_replay(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
 
   to_finalizing(&f, NULL);
   queue_three_keys(&f);
@@ -220,12 +227,12 @@ static void test_err_and_disconnect_replay(void) {
 
 static void test_escape_while_finalizing_drops_queue(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_finalizing(&f, "x");
   queue_three_keys(&f);
   VoiceAction a = press(&f, IBUS_KEY_Escape, KEYCODE_ESC, 0);
   g_assert_cmpint(a.send, ==, VOICE_CMD_CANCEL);
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   g_assert_true(a.consume);
   g_assert_false(a.replay);
@@ -237,7 +244,7 @@ static void test_escape_while_finalizing_drops_queue(void) {
 
 static void test_idle_after_final_passes_keys(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_finalizing(&f, NULL);
   voice_fsm_event(&f, VOICE_EV_FINAL, "abc");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
@@ -248,13 +255,13 @@ static void test_idle_after_final_passes_keys(void) {
 
 static void test_focus_out_cancels(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
 
   to_recording(&f);
   VoiceAction a = voice_fsm_focus_out(&f);
   g_assert_cmpint(a.send, ==, VOICE_CMD_CANCEL);
   g_assert_cmpstr(a.notify, ==, VOICE_NOTIFY_FOCUS_LOST);
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
 
   to_finalizing(&f, "x");
@@ -262,7 +269,7 @@ static void test_focus_out_cancels(void) {
   a = voice_fsm_focus_out(&f);
   g_assert_cmpint(a.send, ==, VOICE_CMD_CANCEL);
   g_assert_cmpstr(a.notify, ==, VOICE_NOTIFY_FOCUS_LOST);
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   g_assert_false(a.replay);
   guint n = 99;
@@ -279,32 +286,32 @@ static void test_focus_out_cancels(void) {
 
 static void test_disconnect_returns_idle(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_recording(&f);
   VoiceAction a = voice_fsm_disconnected(&f);
   g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
   g_assert_cmpstr(a.notify, ==, VOICE_NOTIFY_DISCONNECTED);
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
   voice_fsm_clear(&f);
 }
 
 static void test_err_event_notifies(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   to_finalizing(&f, NULL);
   VoiceAction a = voice_fsm_event(&f, VOICE_EV_ERR, "busy");
   g_assert_nonnull(a.notify);
   g_assert_true(g_str_has_prefix(a.notify, VOICE_NOTIFY_ERROR_PREFIX));
   g_assert_nonnull(strstr(a.notify, "busy"));
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
-  g_assert_cmpstr(a.preedit, ==, "");
+  g_assert_cmpstr(a.aux, ==, "");
   voice_fsm_clear(&f);
 }
 
 static void test_chord_does_not_trigger(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   VoiceAction a = press(&f, IBUS_KEY_Alt_R, HOTKEY_CODE, 0);
   g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
   g_assert_cmpint(f.state, ==, VOICE_IDLE);
@@ -323,7 +330,7 @@ static void test_chord_does_not_trigger(void) {
 
 static void test_composing_ignores_hotkey(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   VoiceAction a = voice_fsm_key(&f, IBUS_KEY_Alt_R, HOTKEY_CODE, 0, TRUE);
   g_assert_false(a.consume);
   g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
@@ -341,7 +348,7 @@ static void test_composing_ignores_hotkey(void) {
 
 static void test_idle_other_keys_pass(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   VoiceAction a = press(&f, IBUS_KEY_a, KEYCODE_A, 0);
   g_assert_false(a.consume);
   g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
@@ -350,7 +357,7 @@ static void test_idle_other_keys_pass(void) {
 
 static void test_shifted_hotkey_does_not_arm(void) {
   VoiceFsm f;
-  voice_fsm_init(&f, IBUS_KEY_Alt_R);
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, FALSE);
   voice_fsm_key(&f, IBUS_KEY_Alt_R, HOTKEY_CODE, IBUS_SHIFT_MASK, FALSE);
   VoiceAction a = voice_fsm_key(&f, IBUS_KEY_Alt_R, HOTKEY_CODE,
                                 IBUS_RELEASE_MASK | IBUS_SHIFT_MASK | IBUS_MOD1_MASK, FALSE);
@@ -359,10 +366,407 @@ static void test_shifted_hotkey_does_not_arm(void) {
   voice_fsm_clear(&f);
 }
 
+/* ---- review mode ---- */
+
+#define KEYCODE_RETURN 28
+#define KEYCODE_KPENTER 96
+#define KEYCODE_LEFT 105
+#define KEYCODE_RIGHT 106
+#define KEYCODE_HOME 102
+#define KEYCODE_END 107
+#define KEYCODE_DELETE 111
+#define KEYCODE_SHIFT 50
+#define KEYCODE_C 54
+
+static void enter_review(VoiceFsm *f, const char *text) {
+  VoiceAction a = tap(f, FALSE);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_START);
+  a = tap(f, FALSE);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_STOP);
+  voice_fsm_event(f, VOICE_EV_FINAL, text);
+  g_assert_cmpint(f->state, ==, VOICE_REVIEW);
+}
+
+static VoiceAction rkey(VoiceFsm *f, guint keyval, guint keycode) {
+  return press(f, keyval, keycode, 0);
+}
+
+static void left_n(VoiceFsm *f, guint n) {
+  for (guint i = 0; i < n; i++) {
+    VoiceAction a = rkey(f, IBUS_KEY_Left, KEYCODE_LEFT);
+    g_assert_true(a.consume);
+  }
+}
+
+static void assert_review(VoiceFsm *f, const char *text, guint cursor) {
+  g_assert_cmpint(f->state, ==, VOICE_REVIEW);
+  g_assert_cmpstr(f->review->str, ==, text);
+  g_assert_cmpuint(f->cursor, ==, cursor);
+}
+
+static void test_final_enters_review(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  to_finalizing(&f, NULL);
+  VoiceAction a = voice_fsm_event(&f, VOICE_EV_FINAL, "你好世界");
+  g_assert_null(a.commit);
+  assert_review(&f, "你好世界", 4);
+  g_assert_cmpstr(a.aux, ==,
+                  VOICE_REVIEW_PREFIX "你好世界" VOICE_REVIEW_CURSOR VOICE_REVIEW_HINT);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_empty_final_goes_idle(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  to_finalizing(&f, NULL);
+  VoiceAction a = voice_fsm_event(&f, VOICE_EV_FINAL, "");
+  g_assert_null(a.commit);
+  g_assert_cmpstr(a.aux, ==, "");
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_cursor_moves(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  VoiceAction a = rkey(&f, IBUS_KEY_Left, KEYCODE_LEFT);
+  g_assert_true(a.consume);
+  a = rkey(&f, IBUS_KEY_Left, KEYCODE_LEFT);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好世界", 2);
+  g_assert_nonnull(a.aux);
+  g_assert_nonnull(strstr(a.aux, "你好" VOICE_REVIEW_CURSOR "世界"));
+  a = rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好世界", 0);
+  a = rkey(&f, IBUS_KEY_Left, KEYCODE_LEFT);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好世界", 0);
+  a = rkey(&f, IBUS_KEY_End, KEYCODE_END);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好世界", 4);
+  a = rkey(&f, IBUS_KEY_Right, KEYCODE_RIGHT);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好世界", 4);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_backspace_delete(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  left_n(&f, 2);
+  VoiceAction a = rkey(&f, IBUS_KEY_BackSpace, KEYCODE_BS);
+  g_assert_true(a.consume);
+  assert_review(&f, "你世界", 1);
+  a = rkey(&f, IBUS_KEY_Delete, KEYCODE_DELETE);
+  g_assert_true(a.consume);
+  assert_review(&f, "你界", 1);
+  /* no-ops at the edges */
+  rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
+  a = rkey(&f, IBUS_KEY_BackSpace, KEYCODE_BS);
+  g_assert_true(a.consume);
+  assert_review(&f, "你界", 0);
+  rkey(&f, IBUS_KEY_End, KEYCODE_END);
+  a = rkey(&f, IBUS_KEY_Delete, KEYCODE_DELETE);
+  g_assert_true(a.consume);
+  assert_review(&f, "你界", 2);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_enter_commits_and_sends(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  VoiceAction a = press(&f, IBUS_KEY_Return, KEYCODE_RETURN, 0);
+  g_assert_true(a.consume);
+  g_assert_cmpstr(a.commit, ==, "你好世界");
+  g_assert_true(a.send_return);
+  g_assert_cmpstr(a.aux, ==, "");
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  g_assert_cmpuint(f.review->len, ==, 0);
+  voice_fsm_clear(&f);
+
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  a = press(&f, IBUS_KEY_KP_Enter, KEYCODE_KPENTER, 0);
+  g_assert_true(a.consume);
+  g_assert_cmpstr(a.commit, ==, "你好世界");
+  g_assert_true(a.send_return);
+  g_assert_cmpstr(a.aux, ==, "");
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  g_assert_cmpuint(f.review->len, ==, 0);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_shift_enter_commits_only(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  VoiceAction a = press(&f, IBUS_KEY_Return, KEYCODE_RETURN, IBUS_SHIFT_MASK);
+  g_assert_true(a.consume);
+  g_assert_cmpstr(a.commit, ==, "你好世界");
+  g_assert_false(a.send_return);
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_escape_discards(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  VoiceAction a = rkey(&f, IBUS_KEY_Escape, KEYCODE_ESC);
+  g_assert_true(a.consume);
+  g_assert_null(a.commit);
+  g_assert_false(a.send_return);
+  g_assert_cmpstr(a.aux, ==, "");
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_composing_passes_everything(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  left_n(&f, 1);
+  VoiceAction a;
+  a = voice_fsm_key(&f, IBUS_KEY_Return, KEYCODE_RETURN, 0, TRUE);
+  g_assert_false(a.consume);
+  assert_review(&f, "你好世界", 3);
+  a = voice_fsm_key(&f, IBUS_KEY_Escape, KEYCODE_ESC, 0, TRUE);
+  g_assert_false(a.consume);
+  assert_review(&f, "你好世界", 3);
+  a = voice_fsm_key(&f, IBUS_KEY_Left, KEYCODE_LEFT, 0, TRUE);
+  g_assert_false(a.consume);
+  assert_review(&f, "你好世界", 3);
+  a = voice_fsm_key(&f, IBUS_KEY_BackSpace, KEYCODE_BS, 0, TRUE);
+  g_assert_false(a.consume);
+  assert_review(&f, "你好世界", 3);
+  a = voice_fsm_key(&f, IBUS_KEY_a, KEYCODE_A, 0, TRUE);
+  g_assert_false(a.consume);
+  assert_review(&f, "你好世界", 3);
+  a = tap(&f, TRUE);
+  g_assert_false(a.consume);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
+  assert_review(&f, "你好世界", 3);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_insert_at_cursor(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  left_n(&f, 2);
+  VoiceAction a = voice_fsm_insert(&f, "美丽的");
+  assert_review(&f, "你好美丽的世界", 5);
+  g_assert_null(a.commit);
+  g_assert_cmpstr(a.aux, ==,
+                  VOICE_REVIEW_PREFIX "你好美丽的" VOICE_REVIEW_CURSOR "世界" VOICE_REVIEW_HINT);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_other_keys_go_to_rime_then_unhandled(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  left_n(&f, 2);
+  VoiceAction a = press(&f, IBUS_KEY_a, KEYCODE_A, 0);
+  g_assert_false(a.consume);
+  assert_review(&f, "你好世界", 2);
+  a = voice_fsm_unhandled(&f, IBUS_KEY_a, 0);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好a世界", 3);
+  g_assert_null(a.commit);
+  /* Control combos are swallowed, not inserted */
+  a = voice_fsm_unhandled(&f, IBUS_KEY_c, IBUS_CONTROL_MASK);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好a世界", 3);
+  g_assert_null(a.commit);
+  /* releases are swallowed, not inserted */
+  a = voice_fsm_unhandled(&f, IBUS_KEY_a, IBUS_RELEASE_MASK);
+  g_assert_true(a.consume);
+  assert_review(&f, "你好a世界", 3);
+  /* Shift must reach Rime for its 中/英 toggle */
+  a = rkey(&f, IBUS_KEY_Shift_L, KEYCODE_SHIFT);
+  g_assert_false(a.consume);
+  assert_review(&f, "你好a世界", 3);
+  voice_fsm_clear(&f);
+}
+
+static void test_unhandled_and_insert_outside_review_are_noops(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  VoiceAction a = voice_fsm_unhandled(&f, IBUS_KEY_a, 0);
+  g_assert_false(a.consume);
+  g_assert_null(a.aux);
+  g_assert_null(a.commit);
+  a = voice_fsm_insert(&f, "abc");
+  g_assert_false(a.consume);
+  g_assert_null(a.aux);
+  g_assert_null(a.commit);
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_hotkey_resumes_recording(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  left_n(&f, 2);
+  VoiceAction a = tap(&f, FALSE);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_START);
+  g_assert_cmpint(f.state, ==, VOICE_RECORDING);
+  g_assert_cmpstr(a.aux, ==, VOICE_AUX_RECORDING);
+  a = tap(&f, FALSE);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_STOP);
+  g_assert_cmpint(f.state, ==, VOICE_FINALIZING);
+  a = voice_fsm_event(&f, VOICE_EV_FINAL, "很大的");
+  g_assert_null(a.commit);
+  assert_review(&f, "你好很大的世界", 5);
+  voice_fsm_clear(&f);
+}
+
+/* Fresh review "你好世界" with cursor 2, then a recording resumed from it. */
+static void resume_from_review(VoiceFsm *f, gboolean finalizing) {
+  voice_fsm_init(f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(f, "你好世界");
+  left_n(f, 2);
+  VoiceAction a = tap(f, FALSE);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_START);
+  if (finalizing) {
+    a = tap(f, FALSE);
+    g_assert_cmpint(a.send, ==, VOICE_CMD_STOP);
+    g_assert_cmpint(f->state, ==, VOICE_FINALIZING);
+  }
+}
+
+static void assert_back_in_review(VoiceFsm *f, VoiceAction a) {
+  assert_review(f, "你好世界", 2);
+  g_assert_nonnull(a.aux);
+  g_assert_true(g_str_has_prefix(a.aux, VOICE_REVIEW_PREFIX));
+  g_assert_null(a.commit);
+}
+
+static void test_review_resume_cancel_returns_to_review(void) {
+  VoiceFsm f;
+  VoiceAction a;
+
+  resume_from_review(&f, FALSE);
+  a = rkey(&f, IBUS_KEY_Escape, KEYCODE_ESC);
+  g_assert_true(a.consume);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_CANCEL);
+  assert_back_in_review(&f, a);
+  voice_fsm_clear(&f);
+
+  resume_from_review(&f, FALSE);
+  a = voice_fsm_focus_out(&f);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_CANCEL);
+  g_assert_cmpstr(a.notify, ==, VOICE_NOTIFY_FOCUS_LOST);
+  assert_back_in_review(&f, a);
+  voice_fsm_clear(&f);
+
+  resume_from_review(&f, TRUE);
+  a = voice_fsm_event(&f, VOICE_EV_ERR, "busy");
+  g_assert_nonnull(a.notify);
+  g_assert_true(g_str_has_prefix(a.notify, VOICE_NOTIFY_ERROR_PREFIX));
+  assert_back_in_review(&f, a);
+  voice_fsm_clear(&f);
+
+  resume_from_review(&f, FALSE);
+  a = voice_fsm_disconnected(&f);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
+  g_assert_cmpstr(a.notify, ==, VOICE_NOTIFY_DISCONNECTED);
+  assert_back_in_review(&f, a);
+  voice_fsm_clear(&f);
+
+  resume_from_review(&f, TRUE);
+  a = voice_fsm_event(&f, VOICE_EV_FINAL, "");
+  g_assert_null(a.notify);
+  assert_back_in_review(&f, a);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_survives_focus_change(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  enter_review(&f, "你好世界");
+  VoiceAction a = voice_fsm_focus_out(&f);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_NONE);
+  g_assert_null(a.notify);
+  assert_review(&f, "你好世界", 4);
+  a = voice_fsm_focus_in(&f);
+  g_assert_cmpstr(a.aux, ==,
+                  VOICE_REVIEW_PREFIX "你好世界" VOICE_REVIEW_CURSOR VOICE_REVIEW_HINT);
+  assert_review(&f, "你好世界", 4);
+  voice_fsm_clear(&f);
+}
+
+static void test_focus_in_idle_is_noop(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  VoiceAction a = voice_fsm_focus_in(&f);
+  g_assert_null(a.aux);
+  g_assert_cmpint(f.state, ==, VOICE_IDLE);
+  voice_fsm_clear(&f);
+}
+
+static void test_review_long_text_window(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  const char *t = "01234567890123456789012345678901234567890123456789"
+                  "01234567890123456789012345678901234567890123456789";
+  g_assert_cmpuint(strlen(t), ==, 100);
+  g_assert_cmpint(VOICE_REVIEW_WINDOW, ==, 40);
+  enter_review(&f, t);
+  g_assert_cmpuint(f.cursor, ==, 100);
+  for (int i = 0; i < 50; i++)
+    rkey(&f, IBUS_KEY_Left, KEYCODE_LEFT);
+  g_assert_cmpuint(f.cursor, ==, 50);
+  VoiceAction a = voice_fsm_focus_in(&f);
+  char *before = g_strndup(t + 30, 20);
+  char *after = g_strndup(t + 50, 20);
+  char *want = g_strconcat(VOICE_REVIEW_PREFIX "…", before, VOICE_REVIEW_CURSOR, after,
+                           "…" VOICE_REVIEW_HINT, NULL);
+  g_assert_cmpstr(a.aux, ==, want);
+  g_free(want);
+  g_free(before);
+  g_free(after);
+
+  a = rkey(&f, IBUS_KEY_Home, KEYCODE_HOME);
+  g_assert_cmpuint(f.cursor, ==, 0);
+  after = g_strndup(t, 40);
+  want = g_strconcat(VOICE_REVIEW_PREFIX VOICE_REVIEW_CURSOR, after, "…" VOICE_REVIEW_HINT,
+                     NULL);
+  g_assert_cmpstr(a.aux, ==, want);
+  g_free(want);
+  g_free(after);
+  voice_fsm_clear(&f);
+}
+
+static void test_keys_queued_while_finalizing_replay_into_review(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_Alt_R, TRUE);
+  to_finalizing(&f, NULL);
+  queue_three_keys(&f);
+  VoiceAction a = voice_fsm_event(&f, VOICE_EV_FINAL, "x");
+  g_assert_null(a.commit);
+  g_assert_true(a.replay);
+  assert_review(&f, "x", 1);
+  guint n = 0;
+  const VoiceKey *q = voice_fsm_queued(&f, &n);
+  g_assert_cmpuint(n, ==, 3);
+  g_assert_cmpuint(q[0].keyval, ==, IBUS_KEY_a);
+  g_assert_cmpuint(q[2].keyval, ==, IBUS_KEY_BackSpace);
+  voice_fsm_drop_queue(&f);
+  voice_fsm_clear(&f);
+}
+
 int main(int argc, char **argv) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/voice_fsm/tap_starts_recording", test_tap_starts_recording);
-  g_test_add_func("/voice_fsm/partial_updates_preedit", test_partial_updates_preedit);
+  g_test_add_func("/voice_fsm/partial_updates_aux", test_partial_updates_aux);
   g_test_add_func("/voice_fsm/second_tap_stops", test_second_tap_stops);
   g_test_add_func("/voice_fsm/final_commits_and_idles", test_final_commits_and_idles);
   g_test_add_func("/voice_fsm/empty_final_commits_nothing", test_empty_final_commits_nothing);
@@ -382,5 +786,22 @@ int main(int argc, char **argv) {
   g_test_add_func("/voice_fsm/composing_ignores_hotkey", test_composing_ignores_hotkey);
   g_test_add_func("/voice_fsm/idle_other_keys_pass", test_idle_other_keys_pass);
   g_test_add_func("/voice_fsm/shifted_hotkey_does_not_arm", test_shifted_hotkey_does_not_arm);
+  g_test_add_func("/voice_fsm/final_enters_review", test_final_enters_review);
+  g_test_add_func("/voice_fsm/review_empty_final_goes_idle", test_review_empty_final_goes_idle);
+  g_test_add_func("/voice_fsm/review_cursor_moves", test_review_cursor_moves);
+  g_test_add_func("/voice_fsm/review_backspace_delete", test_review_backspace_delete);
+  g_test_add_func("/voice_fsm/review_enter_commits_and_sends", test_review_enter_commits_and_sends);
+  g_test_add_func("/voice_fsm/review_shift_enter_commits_only", test_review_shift_enter_commits_only);
+  g_test_add_func("/voice_fsm/review_escape_discards", test_review_escape_discards);
+  g_test_add_func("/voice_fsm/review_composing_passes_everything", test_review_composing_passes_everything);
+  g_test_add_func("/voice_fsm/review_insert_at_cursor", test_review_insert_at_cursor);
+  g_test_add_func("/voice_fsm/review_other_keys_go_to_rime_then_unhandled", test_review_other_keys_go_to_rime_then_unhandled);
+  g_test_add_func("/voice_fsm/unhandled_and_insert_outside_review_are_noops", test_unhandled_and_insert_outside_review_are_noops);
+  g_test_add_func("/voice_fsm/review_hotkey_resumes_recording", test_review_hotkey_resumes_recording);
+  g_test_add_func("/voice_fsm/review_resume_cancel_returns_to_review", test_review_resume_cancel_returns_to_review);
+  g_test_add_func("/voice_fsm/review_survives_focus_change", test_review_survives_focus_change);
+  g_test_add_func("/voice_fsm/focus_in_idle_is_noop", test_focus_in_idle_is_noop);
+  g_test_add_func("/voice_fsm/review_long_text_window", test_review_long_text_window);
+  g_test_add_func("/voice_fsm/keys_queued_while_finalizing_replay_into_review", test_keys_queued_while_finalizing_replay_into_review);
   return g_test_run();
 }

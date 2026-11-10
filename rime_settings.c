@@ -20,6 +20,7 @@ static struct IBusRimeSettings ibus_rime_settings_default = {
   .lookup_table_orientation = IBUS_ORIENTATION_SYSTEM,
   .color_scheme = NULL,
   .voice_hotkey = IBUS_KEY_Alt_R,
+  .voice_review = TRUE,
 };
 
 struct IBusRimeSettings g_ibus_rime_settings;
@@ -96,6 +97,11 @@ ibus_rime_load_settings()
     if (keyval != IBUS_KEY_VoidSymbol) {
       g_ibus_rime_settings.voice_hotkey = keyval;
     }
+  }
+
+  Bool voice_review = True;
+  if (rime_api->config_get_bool(&config, "voice/review", &voice_review)) {
+    g_ibus_rime_settings.voice_review = !!voice_review;
   }
 
   rime_api->config_close(&config);

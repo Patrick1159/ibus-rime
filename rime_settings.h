@@ -31,6 +31,7 @@ struct IBusRimeSettings {
   gint lookup_table_orientation;
   struct ColorSchemeDefinition* color_scheme;
   guint voice_hotkey;
+  gboolean voice_review;
 };
 
 extern struct IBusRimeSettings g_ibus_rime_settings;

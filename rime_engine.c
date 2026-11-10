@@ -67,6 +67,8 @@ static void ibus_rime_engine_property_hide (IBusEngine *engine,
                                             const gchar *prop_name);
 
 static void ibus_rime_engine_update (IBusRimeEngine *rime_engine);
+static void voice_commit_or_insert (IBusRimeEngine *rime_engine, const char *text);
+static void voice_reshow_aux (IBusRimeEngine *rime_engine);
 
 G_DEFINE_TYPE (IBusRimeEngine, ibus_rime_engine, IBUS_TYPE_ENGINE)
 
@@ -105,7 +107,8 @@ static void
 ibus_rime_engine_init (IBusRimeEngine *rime_engine)
 {
   ibus_rime_create_session(rime_engine);
-  voice_fsm_init(&rime_engine->voice, g_ibus_rime_settings.voice_hotkey);
+  voice_fsm_init(&rime_engine->voice, g_ibus_rime_settings.voice_hotkey,
+                 g_ibus_rime_settings.voice_review);
   rime_engine->voice_client = NULL;
 
   RIME_STRUCT_INIT(RimeStatus, rime_engine->status);
@@ -161,11 +164,11 @@ ibus_rime_engine_init (IBusRimeEngine *rime_engine)
 static void
 ibus_rime_engine_destroy (IBusRimeEngine *rime_engine)
 {
-  if (rime_engine->voice.buf) {  /* destroy may run more than once */
+  if (rime_engine->voice.aux) {  /* destroy may run more than once */
     voice_client_free(rime_engine->voice_client);
     rime_engine->voice_client = NULL;
     voice_fsm_clear(&rime_engine->voice);
-    rime_engine->voice.buf = NULL;
+    rime_engine->voice.aux = NULL;
   }
   if (rime_engine->session_id) {
     rime_api->destroy_session(rime_engine->session_id);
@@ -194,6 +197,8 @@ ibus_rime_engine_destroy (IBusRimeEngine *rime_engine)
       (IBusObject *)rime_engine);
 }
 
+static gboolean apply_voice_action(IBusRimeEngine *rime_engine, VoiceAction a);
+
 static void
 ibus_rime_engine_focus_in (IBusEngine *engine)
 {
@@ -203,9 +208,8 @@ ibus_rime_engine_focus_in (IBusEngine *engine)
     ibus_rime_create_session(rime_engine);
   }
   ibus_rime_engine_update(rime_engine);
+  apply_voice_action(rime_engine, voice_fsm_focus_in(&rime_engine->voice));
 }
-
-static gboolean apply_voice_action(IBusRimeEngine *rime_engine, VoiceAction a);
 
 static void
 ibus_rime_engine_focus_out (IBusEngine *engine)
@@ -302,10 +306,7 @@ static void ibus_rime_engine_update(IBusRimeEngine *rime_engine)
   // commit text
   RIME_STRUCT(RimeCommit, commit);
   if (rime_api->get_commit(rime_engine->session_id, &commit)) {
-    IBusText *text;
-    text = ibus_text_new_from_string(commit.text);
-    // the text object will be released by ibus
-    ibus_engine_commit_text((IBusEngine *)rime_engine, text);
+    voice_commit_or_insert(rime_engine, commit.text);
     rime_api->free_commit(&commit);
   }
 
@@ -318,6 +319,7 @@ static void ibus_rime_engine_update(IBusRimeEngine *rime_engine)
     ibus_engine_hide_auxiliary_text((IBusEngine *)rime_engine);
     ibus_engine_hide_lookup_table((IBusEngine *)rime_engine);
     rime_api->free_context(&context);
+    voice_reshow_aux(rime_engine);
     return;
   }
 
@@ -511,6 +513,7 @@ static void ibus_rime_engine_update(IBusRimeEngine *rime_engine)
 
   // end updating UI
   rime_api->free_context(&context);
+  voice_reshow_aux(rime_engine);
 }
 
 static gboolean rime_handle_key (IBusRimeEngine *rime_engine, guint keyval, guint modifiers);
@@ -543,17 +546,43 @@ on_voice_closed (gpointer user_data)
   apply_voice_action(rime_engine, voice_fsm_disconnected(&rime_engine->voice));
 }
 
+/* Voice status and the review buffer live in the auxiliary text, which GNOME Shell draws
+ * next to the cursor for every application (unlike preedit, which some apps hide). */
 static void
-show_voice_preedit (IBusEngine *engine, const char *text)
+show_voice_aux (IBusEngine *engine, const char *text)
 {
-  if (!*text) {
-    ibus_engine_update_preedit_text(engine, ibus_text_new_from_static_string(""), 0, FALSE);
-    return;
+  if (*text) {
+    ibus_engine_update_auxiliary_text(engine, ibus_text_new_from_string(text), TRUE);
+  } else {
+    ibus_engine_hide_auxiliary_text(engine);
   }
-  IBusText *t = ibus_text_new_from_string(text);
-  ibus_text_append_attribute(t, IBUS_ATTR_TYPE_UNDERLINE, IBUS_ATTR_UNDERLINE_SINGLE, 0, -1);
-  ibus_engine_update_preedit_text(engine, t, g_utf8_strlen(text, -1), TRUE);
 }
+
+/* Rime's UI update hides the auxiliary text; put the voice text back while a session or
+ * review is active. */
+static void
+voice_reshow_aux (IBusRimeEngine *rime_engine)
+{
+  if (rime_engine->voice.state != VOICE_IDLE) {
+    show_voice_aux((IBusEngine *)rime_engine, rime_engine->voice.aux->str);
+  }
+}
+
+/* Text Rime commits goes into the review buffer while reviewing, else to the application. */
+static void
+voice_commit_or_insert (IBusRimeEngine *rime_engine, const char *text)
+{
+  if (rime_engine->voice.state == VOICE_REVIEW) {
+    apply_voice_action(rime_engine, voice_fsm_insert(&rime_engine->voice, text));
+  } else {
+    ibus_engine_commit_text((IBusEngine *)rime_engine, ibus_text_new_from_string(text));
+  }
+}
+
+static gboolean ibus_rime_engine_process_key_event (IBusEngine *engine, guint keyval,
+                                                    guint keycode, guint modifiers);
+
+#define RETURN_KEYCODE 28 /* evdev KEY_ENTER */
 
 /* Applies what the voice state machine decided. Returns whether the key is consumed. */
 static gboolean
@@ -569,29 +598,37 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
   } else if (a.send != VOICE_CMD_NONE && rime_engine->voice_client) {
     voice_client_send(rime_engine->voice_client, a.send);
   }
-  if (rime_engine->voice.state == VOICE_IDLE && rime_engine->voice_client) {
+  if (rime_engine->voice_client && rime_engine->voice.state != VOICE_RECORDING &&
+      rime_engine->voice.state != VOICE_FINALIZING) {
     voice_client_free(rime_engine->voice_client);
     rime_engine->voice_client = NULL;
   }
-  if (a.preedit) {
-    show_voice_preedit(engine, a.preedit);
+  if (a.aux) {
+    show_voice_aux(engine, a.aux);
   }
   if (a.commit) {
     ibus_engine_commit_text(engine, ibus_text_new_from_string(a.commit));
+  }
+  if (a.commit && a.send_return) {
+    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, 0);
+    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, IBUS_RELEASE_MASK);
   }
   if (a.notify) {
     ibus_rime_show_message(a.notify, NULL);
   }
   if (a.replay) {
     guint n = 0;
-    const VoiceKey *keys = voice_fsm_queued(&rime_engine->voice, &n);
+    VoiceKey *keys = g_memdup2(voice_fsm_queued(&rime_engine->voice, &n), n * sizeof(VoiceKey));
+    voice_fsm_drop_queue(&rime_engine->voice);
+    /* through the full key path, so keys land in the review buffer when reviewing */
     for (guint i = 0; i < n; ++i) {
-      if (!rime_handle_key(rime_engine, keys[i].keyval, keys[i].modifiers)) {
+      if (!ibus_rime_engine_process_key_event(engine, keys[i].keyval, keys[i].keycode,
+                                              keys[i].modifiers)) {
         ibus_engine_forward_key_event(engine, keys[i].keyval, keys[i].keycode,
                                       keys[i].modifiers);
       }
     }
-    voice_fsm_drop_queue(&rime_engine->voice);
+    g_free(keys);
   }
   return a.consume;
 }
@@ -609,12 +646,19 @@ ibus_rime_engine_process_key_event (IBusEngine *engine,
 
   IBusRimeEngine *rime_engine = (IBusRimeEngine *)engine;
   rime_engine->voice.hotkey = g_ibus_rime_settings.voice_hotkey;
+  rime_engine->voice.review_enabled = g_ibus_rime_settings.voice_review;
   VoiceAction action = voice_fsm_key(&rime_engine->voice, keyval, keycode,
                                      modifiers, rime_is_composing(rime_engine));
   if (apply_voice_action(rime_engine, action)) {
     return TRUE;
   }
-  return rime_handle_key(rime_engine, keyval, modifiers);
+  gboolean handled = rime_handle_key(rime_engine, keyval, modifiers);
+  if (!handled && rime_engine->voice.state == VOICE_REVIEW) {
+    /* never let a key reach the application while reviewing */
+    return apply_voice_action(rime_engine,
+                              voice_fsm_unhandled(&rime_engine->voice, keyval, modifiers));
+  }
+  return handled;
 }
 
 static gboolean
