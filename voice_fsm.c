@@ -106,16 +106,21 @@ GPtrArray *voice_wrap(const char *text, guint cols) {
   return lines;
 }
 
-void voice_review_header(guint hotkey, GString *out) {
-  const char *label;
+static const char *hotkey_label(guint hotkey) {
   switch (hotkey) {
-  case IBUS_KEY_Alt_R: label = "右Alt"; break;
-  case IBUS_KEY_Control_R: label = "右Ctrl"; break;
-  case IBUS_KEY_Shift_R: label = "右Shift"; break;
-  default: label = ibus_keyval_name(hotkey); break;
+  case IBUS_KEY_Alt_R: return "右Alt";
+  case IBUS_KEY_Control_R: return "右Ctrl";
+  case IBUS_KEY_Shift_R: return "右Shift";
+  default: {
+    const char *name = ibus_keyval_name(hotkey);
+    return name ? name : "热键";
   }
+  }
+}
+
+void voice_review_header(guint hotkey, GString *out) {
   g_string_append_printf(out, VOICE_REVIEW_PREFIX "语音草稿 · ⏎ 上屏 · Esc 放弃 · %s 续说",
-                         label ? label : "热键");
+                         hotkey_label(hotkey));
 }
 
 /* Rows of the plain review text and the character offset each row starts at. The cursor
@@ -218,7 +223,8 @@ static VoiceAction start_recording(VoiceFsm *f, gboolean from_review) {
   f->state = VOICE_RECORDING;
   g_string_truncate(f->partial, 0);
   a.send = VOICE_CMD_START;
-  a.aux = set_aux(f, VOICE_AUX_RECORDING, NULL);
+  g_string_printf(f->aux, VOICE_AUX_RECORDING_FMT, hotkey_label(f->hotkey));
+  a.aux = f->aux->str;
   return a;
 }
 

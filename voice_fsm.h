@@ -41,7 +41,7 @@ typedef struct {
   GArray *queued;          /* VoiceKey typed while FINALIZING */
 } VoiceFsm;
 
-#define VOICE_AUX_RECORDING "🎤 录音中 · 热键结束 · Esc 取消"
+#define VOICE_AUX_RECORDING_FMT "🎤 录音中 · %s 结束 · Esc 取消" /* %s: hotkey label */
 #define VOICE_AUX_FINALIZING "⏳ 识别中…"
 #define VOICE_AUX_PARTIAL_RECORDING "🎤 "
 #define VOICE_AUX_PARTIAL_FINALIZING "⏳ "
@@ -50,7 +50,7 @@ typedef struct {
  * lookup table so the cursor row gets the theme's highlight. At most VOICE_REVIEW_MAX_LINES
  * rows around the cursor are shown; a VOICE_REVIEW_MORE row marks hidden rows above/below. */
 #define VOICE_REVIEW_PREFIX "🎙 "
-#define VOICE_REVIEW_CURSOR "▲"
+#define VOICE_REVIEW_CURSOR "˰" /* narrow, sits low: marks the gap without taking a cell */
 #define VOICE_REVIEW_MORE "⋯"
 #define VOICE_COMPOSE_PREFIX "✎ "
 #define VOICE_REVIEW_COLS 36

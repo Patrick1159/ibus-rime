@@ -61,7 +61,7 @@ static void test_tap_starts_recording(void) {
   g_assert_true(a.consume);
   g_assert_cmpint(a.send, ==, VOICE_CMD_START);
   g_assert_cmpint(f.state, ==, VOICE_RECORDING);
-  g_assert_cmpstr(a.aux, ==, VOICE_AUX_RECORDING);
+  g_assert_cmpstr(a.aux, ==, "🎤 录音中 · 右Alt 结束 · Esc 取消");
   voice_fsm_clear(&f);
 }
 
@@ -656,7 +656,7 @@ static void test_review_hotkey_resumes_recording(void) {
   VoiceAction a = tap(&f, FALSE);
   g_assert_cmpint(a.send, ==, VOICE_CMD_START);
   g_assert_cmpint(f.state, ==, VOICE_RECORDING);
-  g_assert_cmpstr(a.aux, ==, VOICE_AUX_RECORDING);
+  g_assert_cmpstr(a.aux, ==, "🎤 录音中 · 右Alt 结束 · Esc 取消");
   a = tap(&f, FALSE);
   g_assert_cmpint(a.send, ==, VOICE_CMD_STOP);
   g_assert_cmpint(f.state, ==, VOICE_FINALIZING);
@@ -818,13 +818,28 @@ static void test_wrap_long_ascii_run_hard_breaks(void) {
 
 static void test_wrap_counts_ambiguous_as_wide(void) {
   GString *t = g_string_new("");
-  for (int i = 0; i < 20; i++) g_string_append(t, VOICE_REVIEW_CURSOR);
+  for (int i = 0; i < 20; i++) g_string_append(t, "▲");   /* East-Asian ambiguous width */
   GPtrArray *l = wrap(t->str, 36);
   g_assert_cmpuint(l->len, ==, 2);
   g_assert_cmpuint(g_utf8_strlen(l->pdata[0], -1), ==, 18);
   g_assert_cmpuint(g_utf8_strlen(l->pdata[1], -1), ==, 2);
   g_ptr_array_unref(l);
   g_string_free(t, TRUE);
+}
+
+static void test_recording_status_names_hotkey(void) {
+  VoiceFsm f;
+  voice_fsm_init(&f, IBUS_KEY_F9, FALSE);
+  voice_fsm_key(&f, IBUS_KEY_F9, 67, 0, FALSE);
+  VoiceAction a = voice_fsm_key(&f, IBUS_KEY_F9, 67, IBUS_RELEASE_MASK, FALSE);
+  g_assert_cmpint(a.send, ==, VOICE_CMD_START);
+  g_assert_cmpstr(a.aux, ==, "🎤 录音中 · F9 结束 · Esc 取消");
+  voice_fsm_clear(&f);
+}
+
+static void test_cursor_marker_is_narrow(void) {
+  gunichar c = g_utf8_get_char(VOICE_REVIEW_CURSOR);
+  g_assert_false(g_unichar_iswide_cjk(c));   /* must not take a full CJK cell */
 }
 
 static void test_review_header_names_hotkey(void) {
@@ -982,7 +997,7 @@ static void test_compose_hint_shows_cursor_row(void) {
   enter_review(&f, "你好世界");
   left_n(&f, 2);
   g_assert_cmpstr(voice_fsm_compose_hint(&f), ==, VOICE_COMPOSE_PREFIX "你好" VOICE_REVIEW_CURSOR "世界");
-  g_assert_cmpstr(voice_fsm_compose_hint(&f), ==, "✎ 你好▲世界");
+  g_assert_cmpstr(voice_fsm_compose_hint(&f), ==, VOICE_COMPOSE_PREFIX "你好" VOICE_REVIEW_CURSOR "世界");
   voice_fsm_clear(&f);
 }
 
@@ -1075,6 +1090,8 @@ int main(int argc, char **argv) {
   g_test_add_func("/voice_fsm/wrap_long_ascii_run_hard_breaks", test_wrap_long_ascii_run_hard_breaks);
   g_test_add_func("/voice_fsm/wrap_counts_ambiguous_as_wide", test_wrap_counts_ambiguous_as_wide);
   g_test_add_func("/voice_fsm/review_header_names_hotkey", test_review_header_names_hotkey);
+  g_test_add_func("/voice_fsm/recording_status_names_hotkey", test_recording_status_names_hotkey);
+  g_test_add_func("/voice_fsm/cursor_marker_is_narrow", test_cursor_marker_is_narrow);
   g_test_add_func("/voice_fsm/review_note_wraps_and_windows", test_review_note_wraps_and_windows);
   g_test_add_func("/voice_fsm/review_note_window_middle", test_review_note_window_middle);
   g_test_add_func("/voice_fsm/review_up_down_moves_by_row", test_review_up_down_moves_by_row);
