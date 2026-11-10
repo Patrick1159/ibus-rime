@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- filename: rime.xml -->
 <component>
-	<name>im.rime.Rime</name>
-	<description>Rime Component</description>
-	<exec>@CMAKE_INSTALL_FULL_LIBEXECDIR@/ibus-rime/ibus-engine-rime --ibus</exec>
+	<name>im.rime.RimeVoice</name>
+	<description>Rime Component with voice input</description>
+	<exec>@CMAKE_INSTALL_FULL_LIBEXECDIR@/ibus-rime-voice/ibus-engine-rime-voice --ibus</exec>
 	<version>1.0</version>
 	<author>GONG Chen &lt;chen.sst@gmail.com&gt;</author>
 	<license>GPL</license>
@@ -11,13 +11,13 @@
 	<textdomain>ibus-rime</textdomain>
 	<engines>
 		<engine>
-			<name>rime</name>
+			<name>rime-voice</name>
 			<language>zh</language>
 			<license>GPL</license>
 			<author>GONG Chen &lt;chen.sst@gmail.com&gt;</author>
-			<icon>@CMAKE_INSTALL_FULL_DATADIR@/ibus-rime/icons/rime.png</icon>
+			<icon>@CMAKE_INSTALL_FULL_DATADIR@/ibus-rime-voice/icons/rime.png</icon>
 			<layout>default</layout>
-			<longname>Rime</longname>
+			<longname>Rime 语音</longname>
 			<description>Rime Input Method Engine</description>
 			<rank>0</rank>
 			<symbol>&#x37A2;</symbol>

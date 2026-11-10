@@ -33,7 +33,7 @@ endif(NOT DEFINED RIME_DATA_DIR)
 message(STATUS "Precompiler macro RIME_DATA_DIR is set to \"${RIME_DATA_DIR}\"")
 add_definitions(-DRIME_DATA_DIR="${RIME_DATA_DIR}")
 
-set(ibus_rime_icons_dir "${CMAKE_INSTALL_FULL_DATADIR}/ibus-rime/icons")
+set(ibus_rime_icons_dir "${CMAKE_INSTALL_FULL_DATADIR}/ibus-rime-voice/icons")
 configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/rime_config.h.in"
   "${CMAKE_CURRENT_BINARY_DIR}/rime_config.h"
@@ -53,16 +53,30 @@ if(BUILD_STATIC)
       libglog.a libleveldb.a libmarisa.a libopencc.a libyaml-cpp.a)
 endif(BUILD_STATIC)
 
-aux_source_directory(. IBUS_RIME_SRC)
-add_executable(ibus-engine-rime ${IBUS_RIME_SRC})
-target_link_libraries(ibus-engine-rime ${IBus_LIBRARIES} ${LIBNOTIFY_LIBRARIES} ${Rime_LIBRARIES} ${RIME_DEPS})
+set(IBUS_RIME_SRC rime_engine.c rime_main.c rime_settings.c
+    voice_client.c voice_fsm.c voice_proto.c)
+add_executable(ibus-engine-rime-voice ${IBUS_RIME_SRC})
+target_link_libraries(ibus-engine-rime-voice ${IBus_LIBRARIES} ${LIBNOTIFY_LIBRARIES} ${Rime_LIBRARIES} ${RIME_DEPS})
+
+option(VOICE_TESTS "build voice unit tests" OFF)
+if(VOICE_TESTS)
+  enable_testing()
+  pkg_check_modules(GIO REQUIRED gio-unix-2.0)
+  foreach(t voice_proto voice_fsm voice_client)
+    add_executable(test_${t} tests/test_${t}.c voice_proto.c voice_fsm.c voice_client.c)
+    target_include_directories(test_${t} PRIVATE ${GIO_INCLUDE_DIRS})
+    target_link_libraries(test_${t} ${IBus_LIBRARIES} ${GIO_LIBRARIES})
+    add_test(NAME ${t} COMMAND test_${t})
+  endforeach()
+endif(VOICE_TESTS)
 
 configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/rime.xml.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/rime.xml"
+  "${CMAKE_CURRENT_BINARY_DIR}/rime-voice.xml"
   @ONLY)
 
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/rime.xml" DESTINATION "${CMAKE_INSTALL_DATADIR}/ibus/component")
-install(TARGETS ibus-engine-rime DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/ibus-rime")
-install(DIRECTORY icons DESTINATION "${CMAKE_INSTALL_DATADIR}/ibus-rime" FILES_MATCHING PATTERN "*.png")
-install(FILES ibus_rime.yaml DESTINATION "${RIME_DATA_DIR}")
+# The component XML must go to /usr/share/ibus/component (the only directory
+# ibus-daemon scans); the module installs it from the build dir. ibus_rime.yaml
+# comes from the distro's ibus-rime package and is not installed here.
+install(TARGETS ibus-engine-rime-voice DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/ibus-rime-voice")
+install(DIRECTORY icons DESTINATION "${CMAKE_INSTALL_DATADIR}/ibus-rime-voice" FILES_MATCHING PATTERN "*.png")

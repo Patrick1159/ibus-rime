@@ -8,4 +8,6 @@
 
 GType ibus_rime_engine_get_type();
 
+void ibus_rime_show_message(const char* summary, const char* details);
+
 #endif

@@ -19,6 +19,7 @@ static struct IBusRimeSettings ibus_rime_settings_default = {
   .cursor_type = CURSOR_TYPE_INSERT,
   .lookup_table_orientation = IBUS_ORIENTATION_SYSTEM,
   .color_scheme = NULL,
+  .voice_hotkey = IBUS_KEY_Alt_R,
 };
 
 struct IBusRimeSettings g_ibus_rime_settings;
@@ -86,6 +87,15 @@ ibus_rime_load_settings()
     rime_api->config_get_cstring(&config, "style/color_scheme");
   if (color_scheme) {
     select_color_scheme(&g_ibus_rime_settings, color_scheme);
+  }
+
+  const char* voice_hotkey =
+    rime_api->config_get_cstring(&config, "voice/hotkey");
+  if (voice_hotkey) {
+    guint keyval = ibus_keyval_from_name(voice_hotkey);
+    if (keyval != IBUS_KEY_VoidSymbol) {
+      g_ibus_rime_settings.voice_hotkey = keyval;
+    }
   }
 
   rime_api->config_close(&config);

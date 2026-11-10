@@ -30,6 +30,7 @@ struct IBusRimeSettings {
   gint cursor_type;
   gint lookup_table_orientation;
   struct ColorSchemeDefinition* color_scheme;
+  guint voice_hotkey;
 };
 
 extern struct IBusRimeSettings g_ibus_rime_settings;

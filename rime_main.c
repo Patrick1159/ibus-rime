@@ -29,7 +29,7 @@ static const char* get_ibus_rime_user_data_dir(char *path) {
   return path;
 }
 
-static void show_message(const char* summary, const char* details) {
+void ibus_rime_show_message(const char* summary, const char* details) {
   NotifyNotification* notice = notify_notification_new(summary, details, NULL);
   notify_notification_show(notice, NULL);
   g_object_unref(notice);
@@ -41,14 +41,14 @@ static void notification_handler(void* context_object,
                                  const char* message_value) {
   if (!strcmp(message_type, "deploy")) {
     if (!strcmp(message_value, "start")) {
-      show_message(_("Rime is under maintenance ..."), NULL);
+      ibus_rime_show_message(_("Rime is under maintenance ..."), NULL);
     }
     else if (!strcmp(message_value, "success")) {
-      show_message(_("Rime is ready."), NULL);
+      ibus_rime_show_message(_("Rime is ready."), NULL);
       ibus_rime_load_settings();
     }
     else if (!strcmp(message_value, "failure")) {
-      show_message(_("Rime has encountered an error."),
+      ibus_rime_show_message(_("Rime has encountered an error."),
                    _("See /tmp/rime.ibus.ERROR for details."));
     }
     return;
@@ -104,8 +104,8 @@ static void rime_with_ibus() {
   IBusFactory *factory = ibus_factory_new(ibus_bus_get_connection(bus));
   g_object_ref_sink(factory);
 
-  ibus_factory_add_engine(factory, "rime", IBUS_TYPE_RIME_ENGINE);
-  if (!ibus_bus_request_name(bus, "im.rime.Rime", 0)) {
+  ibus_factory_add_engine(factory, "rime-voice", IBUS_TYPE_RIME_ENGINE);
+  if (!ibus_bus_request_name(bus, "im.rime.RimeVoice", 0)) {
     g_error("error requesting bus name");
     exit(1);
   }
