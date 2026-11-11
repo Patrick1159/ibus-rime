@@ -20,10 +20,19 @@ void voice_fsm_init(VoiceFsm *f, guint hotkey_keyval, gboolean review_enabled) {
   f->partial = g_string_new("");
   f->review = g_string_new("");
   f->cursor = 0;
+  f->cursor_up = FALSE;
+  f->hotkey_down = FALSE;
+  f->shift_r_down = FALSE;
+  f->return_pending = FALSE;
+  f->swallow_shift = FALSE;
+  f->chord_dropped = FALSE;
+  f->settings_row = 0;
+  f->settings_back = VOICE_IDLE;
   f->note = g_ptr_array_new_with_free_func(g_free);
   f->note_labels = g_ptr_array_new();  /* borrowed static strings */
   f->enter_sends = FALSE;
   f->cursor_mark = VOICE_REVIEW_CURSOR;
+  f->blink_off = FALSE;
   f->note_cursor = -1;
   f->compose_hint = g_string_new("");
   f->commit_buf = g_string_new("");
@@ -107,9 +116,19 @@ GPtrArray *voice_wrap(const char *text, guint cols) {
 }
 
 const char *voice_cursor_mark(const char *style) {
+  if (style && !strcmp(style, "block")) return "▮";
+  if (style && !strcmp(style, "caret")) return "˰";
   if (style && !strcmp(style, "bar")) return "|";
   if (style && !strcmp(style, "triangle")) return "▲";
   return VOICE_REVIEW_CURSOR;
+}
+
+const char *voice_cursor_blank(const char *mark) {
+  if (!strcmp(mark, "▮")) return "\xE2\x80\x84 ";                /* three-per-em + space */
+  if (!strcmp(mark, "˰")) return "\xE2\x80\x86\xE2\x80\x85";  /* six-per-em + four-per-em */
+  if (!strcmp(mark, "|")) return "\xE2\x80\x88";                 /* punctuation space */
+  if (!strcmp(mark, "▲")) return "\xE3\x80\x80";                 /* ideographic space */
+  return "\xE2\x80\x88\xE2\x80\x87";                          /* ❚: punctuation + figure */
 }
 
 static const char *hotkey_label(guint hotkey) {
@@ -124,9 +143,13 @@ static const char *hotkey_label(guint hotkey) {
   }
 }
 
-void voice_review_header(guint hotkey, GString *out) {
-  g_string_append_printf(out, VOICE_REVIEW_PREFIX "语音草稿 · ⏎ 上屏 · Esc 放弃 · %s 续说\n"
-                         VOICE_REVIEW_RULE, hotkey_label(hotkey));
+static const char *enter_hint(gboolean enter_sends) {
+  return enter_sends ? "⏎ 发送 · 右⇧⏎ 上屏" : "⏎ 上屏 · 右⇧⏎ 发送";
+}
+
+void voice_review_header(guint hotkey, gboolean enter_sends, GString *out) {
+  g_string_append_printf(out, VOICE_REVIEW_PREFIX "语音草稿 · %s · Esc 放弃 · %s 续说\n"
+                         VOICE_REVIEW_RULE, enter_hint(enter_sends), hotkey_label(hotkey));
 }
 
 /* Rows of the plain review text and the character offset each row starts at. The cursor
@@ -147,6 +170,13 @@ static guint row_of(GArray *starts, guint cursor) {
   return r;
 }
 
+/* Row the cursor is drawn in: at a wrap point, the upper row when cursor_up is set. */
+static guint cursor_row(VoiceFsm *f, GArray *starts) {
+  guint r = row_of(starts, f->cursor);
+  if (f->cursor_up && r > 0 && g_array_index(starts, guint, r) == f->cursor) --r;
+  return r;
+}
+
 static void clear_note(VoiceFsm *f) {
   g_ptr_array_set_size(f->note, 0);
   g_ptr_array_set_size(f->note_labels, 0);
@@ -155,13 +185,17 @@ static void clear_note(VoiceFsm *f) {
 }
 
 /* Lays out the note rows and returns the header for the aux text. */
-static const char *render_review(VoiceFsm *f) {
+static const char *layout_review(VoiceFsm *f) {
   GArray *starts = g_array_new(FALSE, FALSE, sizeof(guint));
   GPtrArray *rows = review_rows(f, starts);
-  guint cur = row_of(starts, f->cursor);
+  guint cur = cursor_row(f, starts);
+  gsize at = g_utf8_offset_to_pointer(rows->pdata[cur], f->cursor - g_array_index(starts, guint, cur)) -
+             (const char *)rows->pdata[cur];
+  /* the compose hint always shows the mark; the note row follows the blink phase */
+  GString *hint = g_string_new(rows->pdata[cur]);
+  g_string_insert(hint, at, f->cursor_mark);
   GString *row = g_string_new(rows->pdata[cur]);
-  const char *p = g_utf8_offset_to_pointer(row->str, f->cursor - g_array_index(starts, guint, cur));
-  g_string_insert(row, p - row->str, f->cursor_mark);
+  g_string_insert(row, at, f->blink_off ? voice_cursor_blank(f->cursor_mark) : f->cursor_mark);
   g_free(rows->pdata[cur]);
   rows->pdata[cur] = g_string_free(row, FALSE);
 
@@ -172,6 +206,9 @@ static const char *render_review(VoiceFsm *f) {
     last = first + VOICE_REVIEW_MAX_LINES;
   }
   clear_note(f);
+  g_string_append(f->compose_hint, VOICE_COMPOSE_PREFIX);
+  g_string_append(f->compose_hint, hint->str);
+  g_string_free(hint, TRUE);
   guint n = rows->len, v = last - first;
   guint thumb_len = 0, thumb_start = 0;
   if (n > v) {
@@ -187,28 +224,39 @@ static const char *render_review(VoiceFsm *f) {
                                : (k >= thumb_start && k < thumb_start + thumb_len)
                                    ? VOICE_SCROLL_THUMB : VOICE_SCROLL_TRACK));
   }
-  g_string_assign(f->compose_hint, VOICE_COMPOSE_PREFIX);
-  g_string_append(f->compose_hint, rows->pdata[cur]);
 
   g_ptr_array_unref(rows);
   g_array_free(starts, TRUE);
   g_string_truncate(f->aux, 0);
-  voice_review_header(f->hotkey, f->aux);
+  voice_review_header(f->hotkey, f->enter_sends, f->aux);
   return f->aux->str;
 }
 
-/* Up/Down: same character offset in the neighbouring row, clamped to its length. */
+/* Redraw after a change: the mark shows again whatever the blink phase. */
+static const char *render_review(VoiceFsm *f) {
+  f->blink_off = FALSE;
+  return layout_review(f);
+}
+
+VoiceAction voice_fsm_blink(VoiceFsm *f) {
+  VoiceAction a = pass(FALSE);
+  if (f->state != VOICE_REVIEW) return a;
+  f->blink_off = !f->blink_off;
+  layout_review(f);
+  a.note = TRUE;
+  return a;
+}
+
+/* Up/Down: same character offset in the neighbouring row; at or past its end, its end. */
 static void move_row(VoiceFsm *f, gint delta) {
   GArray *starts = g_array_new(FALSE, FALSE, sizeof(guint));
   GPtrArray *rows = review_rows(f, starts);
-  gint cur = row_of(starts, f->cursor), to = cur + delta;
+  gint cur = cursor_row(f, starts), to = cur + delta;
   if (to >= 0 && to < (gint)rows->len) {
     guint offset = f->cursor - g_array_index(starts, guint, cur);
     guint len = g_utf8_strlen(rows->pdata[to], -1);
-    /* the position just past a row's last char belongs to the next row, so a target row
-     * other than the last can only take up to its last char */
-    guint max = (to + 1 < (gint)rows->len && len > 0) ? len - 1 : len;
-    f->cursor = g_array_index(starts, guint, to) + MIN(offset, max);
+    f->cursor = g_array_index(starts, guint, to) + MIN(offset, len);
+    f->cursor_up = offset >= len;
   }
   g_ptr_array_unref(rows);
   g_array_free(starts, TRUE);
@@ -236,6 +284,7 @@ static void jump_chunk(VoiceFsm *f, gboolean forward) {
 static void review_insert(VoiceFsm *f, const char *text) {
   g_string_insert(f->review, byte_at(f, f->cursor), text);
   f->cursor += g_utf8_strlen(text, -1);
+  f->cursor_up = TRUE;
 }
 
 static void review_erase(VoiceFsm *f, guint from) { /* one character at `from` */
@@ -259,7 +308,7 @@ static VoiceAction start_recording(VoiceFsm *f, gboolean from_review) {
   f->state = VOICE_RECORDING;
   g_string_truncate(f->partial, 0);
   a.send = VOICE_CMD_START;
-  g_string_printf(f->aux, VOICE_AUX_RECORDING_FMT, hotkey_label(f->hotkey));
+  g_string_printf(f->aux, VOICE_AUX_RECORDING_FMT, hotkey_label(f->hotkey), hotkey_label(f->hotkey));
   a.aux = f->aux->str;
   return a;
 }
@@ -301,12 +350,161 @@ static VoiceAction finish_review(VoiceFsm *f, gboolean commit, gboolean send_ret
   return a;
 }
 
+/* ---- settings panel ---- */
+
+static const char *const CURSOR_STYLES[] = {"heavy", "block", "caret", "bar", "triangle"};
+static const char *const CURSOR_NAMES[] = {"❚ 粗竖线", "▮ 方块", "˰ 下角标", "| 细竖线", "▲ 三角"};
+static const char *const HOTKEY_NAMES[] = {"Alt_R", "Control_R", "Menu"};
+static const guint HOTKEY_VALS[] = {IBUS_KEY_Alt_R, IBUS_KEY_Control_R, IBUS_KEY_Menu};
+
+static guint cursor_style_index(VoiceFsm *f) {
+  for (guint i = 0; i < G_N_ELEMENTS(CURSOR_STYLES); ++i)
+    if (!strcmp(voice_cursor_mark(CURSOR_STYLES[i]), f->cursor_mark)) return i;
+  return 0;
+}
+
+static gint hotkey_index(VoiceFsm *f) {
+  for (guint i = 0; i < G_N_ELEMENTS(HOTKEY_VALS); ++i)
+    if (HOTKEY_VALS[i] == f->hotkey) return i;
+  return -1;
+}
+
+static const char *render_settings(VoiceFsm *f) {
+  clear_note(f);
+  for (guint i = 0; i < VOICE_SETTINGS_ROWS; ++i) {
+    const char *name = "", *value = "";
+    switch (i) {
+    case 0: name = "发送方式"; value = enter_hint(f->enter_sends); break;
+    case 1: name = "光标样式"; value = CURSOR_NAMES[cursor_style_index(f)]; break;
+    case 2: name = "审阅便签"; value = f->review_enabled ? "开 · 识别结果先进便签" : "关 · 识别结果直接上屏"; break;
+    case 3: name = "录音热键"; value = hotkey_label(f->hotkey); break;
+    }
+    g_ptr_array_add(f->note, i == f->settings_row ? g_strdup_printf("%s　◂ %s ▸", name, value)
+                                                  : g_strdup_printf("%s　  %s", name, value));
+    g_ptr_array_add(f->note_labels, (gpointer)VOICE_SCROLL_NONE);
+  }
+  g_ptr_array_add(f->note, g_strdup(VOICE_SETTINGS_FOOTER));
+  g_ptr_array_add(f->note_labels, (gpointer)VOICE_SCROLL_NONE);
+  f->note_cursor = f->settings_row;
+  return set_aux(f, VOICE_SETTINGS_HEADER, NULL);
+}
+
+static VoiceAction open_settings(VoiceFsm *f, VoiceState back) {
+  VoiceAction a = pass(TRUE);
+  f->armed = FALSE;
+  f->settings_back = back;
+  f->settings_row = 0;
+  f->state = VOICE_SETTINGS;
+  a.aux = render_settings(f);
+  a.note = TRUE;
+  return a;
+}
+
+/* Back to IDLE or REVIEW; the returned action redraws what is there. */
+static VoiceAction close_settings(VoiceFsm *f) {
+  VoiceAction a = pass(TRUE);
+  f->state = f->settings_back;
+  if (f->state == VOICE_REVIEW) {
+    a.aux = render_review(f);
+    a.note = TRUE;
+  } else {
+    clear_note(f);
+    a.aux = set_aux(f, "", NULL);
+  }
+  return a;
+}
+
+/* Step the selected option by dir (+1/-1); fills in what changed for the glue. */
+static void change_setting(VoiceFsm *f, gint dir, VoiceAction *a) {
+  switch (f->settings_row) {
+  case 0:
+    f->enter_sends = !f->enter_sends;
+    a->setting_key = "enter_sends";
+    a->setting_value = f->enter_sends ? "true" : "false";
+    break;
+  case 1: {
+    guint n = G_N_ELEMENTS(CURSOR_STYLES), i = (cursor_style_index(f) + n + dir) % n;
+    f->cursor_mark = voice_cursor_mark(CURSOR_STYLES[i]);
+    a->setting_key = "cursor";
+    a->setting_value = CURSOR_STYLES[i];
+    break;
+  }
+  case 2:
+    f->review_enabled = !f->review_enabled;
+    a->setting_key = "review";
+    a->setting_value = f->review_enabled ? "true" : "false";
+    break;
+  case 3: {
+    gint n = G_N_ELEMENTS(HOTKEY_VALS), i = hotkey_index(f);
+    i = i < 0 ? (dir > 0 ? 0 : n - 1) : (i + n + dir) % n;
+    f->hotkey = HOTKEY_VALS[i];
+    f->hotkey_down = FALSE; /* the old key's release will no longer match */
+    f->armed = FALSE;
+    a->setting_key = "hotkey";
+    a->setting_value = HOTKEY_NAMES[i];
+    break;
+  }
+  }
+}
+
+/* Modifier the hotkey itself sets while held; Shift hotkeys get no chord (Shift+I is a capital I). */
+static gboolean hotkey_mask(guint hotkey, guint *mask) {
+  switch (hotkey) {
+  case IBUS_KEY_Shift_L: case IBUS_KEY_Shift_R: return FALSE;
+  case IBUS_KEY_Alt_L: case IBUS_KEY_Alt_R: *mask = IBUS_MOD1_MASK; return TRUE;
+  case IBUS_KEY_Control_L: case IBUS_KEY_Control_R: *mask = IBUS_CONTROL_MASK; return TRUE;
+  case IBUS_KEY_Super_L: case IBUS_KEY_Super_R: *mask = IBUS_SUPER_MASK | IBUS_MOD4_MASK; return TRUE;
+  default: *mask = 0; return TRUE;
+  }
+}
+
+/* hotkey + I, and nothing else held: the hotkey's own modifier must be down (so a stale
+ * hotkey_down cannot fire) and no other one (Shift/Ctrl+Alt+I belong to the application). */
+static gboolean is_settings_chord(VoiceFsm *f, guint keyval, guint modifiers) {
+  guint mask = 0;
+  if ((modifiers & IBUS_RELEASE_MASK) || !f->hotkey_down || !hotkey_mask(f->hotkey, &mask)) return FALSE;
+  if (keyval != IBUS_KEY_i && keyval != IBUS_KEY_I) return FALSE;
+  return (modifiers & ~IGNORED_MODS) == mask;
+}
+
+static VoiceAction settings_key(VoiceFsm *f, guint keyval, guint modifiers) {
+  gboolean release = (modifiers & IBUS_RELEASE_MASK) != 0;
+  VoiceAction a = pass(TRUE);
+  if (release) return a;
+  if (is_settings_chord(f, keyval, modifiers)) return close_settings(f);
+  switch (keyval) {
+  case IBUS_KEY_Escape:
+  case IBUS_KEY_Return:
+  case IBUS_KEY_KP_Enter:
+    return close_settings(f);
+  case IBUS_KEY_Up:
+    if (f->settings_row > 0) f->settings_row--;
+    break;
+  case IBUS_KEY_Down:
+    if (f->settings_row + 1 < VOICE_SETTINGS_ROWS) f->settings_row++;
+    break;
+  case IBUS_KEY_Left:
+    change_setting(f, -1, &a);
+    break;
+  case IBUS_KEY_Right:
+  case IBUS_KEY_space:
+    change_setting(f, 1, &a);
+    break;
+  default:
+    return a;
+  }
+  a.aux = render_settings(f);
+  a.note = TRUE;
+  return a;
+}
+
 static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboolean composing) {
   gboolean release = (modifiers & IBUS_RELEASE_MASK) != 0;
   if (composing) {
     f->armed = FALSE;
     return pass(FALSE);
   }
+  if (is_settings_chord(f, keyval, modifiers)) return open_settings(f, VOICE_REVIEW);
   if (keyval == f->hotkey) {
     if (!release) {
       f->armed = bare(modifiers);
@@ -322,17 +520,30 @@ static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboole
   VoiceAction a = pass(TRUE);
   switch (keyval) {
   case IBUS_KEY_Return:
-  case IBUS_KEY_KP_Enter:
-    return finish_review(f, TRUE, f->enter_sends && !(modifiers & IBUS_SHIFT_MASK));
+  case IBUS_KEY_KP_Enter: {
+    gboolean shift = (modifiers & IBUS_SHIFT_MASK) != 0;
+    gboolean alt = shift && f->shift_r_down; /* right Shift+Enter: the non-default action */
+    gboolean send = f->enter_sends ? !alt : alt;
+    a = finish_review(f, TRUE, send && !shift);
+    f->return_pending = send && shift && a.commit; /* sent on the Shift release */
+    f->swallow_shift = shift;
+    return a;
+  }
   case IBUS_KEY_Escape:
     return finish_review(f, FALSE, FALSE);
   case IBUS_KEY_Left:
     if (modifiers & IBUS_CONTROL_MASK) jump_chunk(f, FALSE);
     else if (f->cursor > 0) f->cursor--;
+    f->cursor_up = FALSE;
     break;
   case IBUS_KEY_Right:
-    if (modifiers & IBUS_CONTROL_MASK) jump_chunk(f, TRUE);
-    else if (f->cursor < len) f->cursor++;
+    if (modifiers & IBUS_CONTROL_MASK) {
+      jump_chunk(f, TRUE);
+      f->cursor_up = FALSE; /* a chunk start belongs before the word on the lower row */
+    } else {
+      if (f->cursor < len) f->cursor++;
+      f->cursor_up = TRUE;
+    }
     break;
   case IBUS_KEY_Up:
     move_row(f, -1);
@@ -342,12 +553,15 @@ static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboole
     break;
   case IBUS_KEY_Home:
     f->cursor = 0;
+    f->cursor_up = FALSE;
     break;
   case IBUS_KEY_End:
     f->cursor = len;
+    f->cursor_up = TRUE;
     break;
   case IBUS_KEY_BackSpace:
     if (f->cursor > 0) review_erase(f, --f->cursor);
+    f->cursor_up = TRUE;
     break;
   case IBUS_KEY_Delete:
     if (f->cursor < len) review_erase(f, f->cursor);
@@ -366,12 +580,26 @@ VoiceAction voice_fsm_key(VoiceFsm *f, guint keyval, guint keycode, guint modifi
   gboolean hot = keyval == f->hotkey;
   VoiceAction a;
 
+  if (hot) f->hotkey_down = !release;
+  if (keyval == IBUS_KEY_Shift_R) f->shift_r_down = !release;
+  if (f->swallow_shift) {
+    gboolean shift = keyval == IBUS_KEY_Shift_L || keyval == IBUS_KEY_Shift_R;
+    if (shift && release) {
+      a = pass(TRUE); /* Rime saw the Shift press but not the Enter: it would take a Shift tap */
+      a.send_return = f->return_pending;
+      f->swallow_shift = f->return_pending = FALSE;
+      return a;
+    }
+    if (!release && !shift) f->swallow_shift = f->return_pending = FALSE;
+  }
+
   switch (f->state) {
   case VOICE_IDLE:
     if (rime_composing) {
       f->armed = FALSE;
       return pass(FALSE);
     }
+    if (is_settings_chord(f, keyval, modifiers)) return open_settings(f, VOICE_IDLE);
     if (hot && !release) {
       f->armed = bare(modifiers);
       return pass(f->armed);
@@ -383,6 +611,12 @@ VoiceAction voice_fsm_key(VoiceFsm *f, guint keyval, guint keycode, guint modifi
   case VOICE_RECORDING:
     if (keyval == IBUS_KEY_Escape && !release)
       return leave_session(f, VOICE_CMD_CANCEL, NULL, TRUE);
+    if (is_settings_chord(f, keyval, modifiers)) {
+      leave_session(f, VOICE_CMD_NONE, NULL, TRUE);
+      a = open_settings(f, f->state);
+      a.send = VOICE_CMD_CANCEL;
+      return a;
+    }
     if (hot && !release) {
       f->armed = bare(modifiers);
       return pass(TRUE);
@@ -402,6 +636,13 @@ VoiceAction voice_fsm_key(VoiceFsm *f, guint keyval, guint keycode, guint modifi
   case VOICE_FINALIZING:
     if (keyval == IBUS_KEY_Escape && !release)
       return leave_session(f, VOICE_CMD_CANCEL, NULL, TRUE);
+    if (keyval == IBUS_KEY_i || keyval == IBUS_KEY_I) {
+      if (is_settings_chord(f, keyval, modifiers)) f->chord_dropped = TRUE;
+      if (f->chord_dropped) { /* not replayed: neither the panel nor Alt+I later */
+        if (release) f->chord_dropped = FALSE;
+        return pass(TRUE);
+      }
+    }
     if (!hot) {
       VoiceKey k = {keyval, keycode, modifiers};
       g_array_append_val(f->queued, k);
@@ -410,6 +651,9 @@ VoiceAction voice_fsm_key(VoiceFsm *f, guint keyval, guint keycode, guint modifi
 
   case VOICE_REVIEW:
     return review_key(f, keyval, modifiers, rime_composing);
+
+  case VOICE_SETTINGS:
+    return settings_key(f, keyval, modifiers);
   }
   return pass(FALSE);
 }
@@ -476,12 +720,26 @@ VoiceAction voice_fsm_disconnected(VoiceFsm *f) {
 
 VoiceAction voice_fsm_focus_out(VoiceFsm *f) {
   f->armed = FALSE;
+  f->hotkey_down = FALSE;
+  f->shift_r_down = FALSE;
+  f->return_pending = FALSE;
+  f->swallow_shift = FALSE;
+  if (f->state == VOICE_SETTINGS) { /* close it; a review behind it stays */
+    VoiceAction a = close_settings(f);
+    a.consume = FALSE;
+    a.note = FALSE;
+    a.aux = f->state == VOICE_IDLE ? a.aux : NULL;
+    return a;
+  }
   if (f->state != VOICE_RECORDING && f->state != VOICE_FINALIZING) return pass(FALSE);
   return leave_session(f, VOICE_CMD_CANCEL, VOICE_NOTIFY_FOCUS_LOST, TRUE);
 }
 
 VoiceAction voice_fsm_focus_in(VoiceFsm *f) {
   f->armed = FALSE;
+  if (f->state == VOICE_REVIEW && f->blink_off) render_review(f); /* come back with the mark shown */
+  f->hotkey_down = FALSE;
+  f->shift_r_down = FALSE;
   VoiceAction a = pass(FALSE);
   if (f->state != VOICE_IDLE) a.aux = f->aux->str;
   a.note = f->state == VOICE_REVIEW;

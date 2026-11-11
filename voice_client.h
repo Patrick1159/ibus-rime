@@ -20,4 +20,13 @@ void voice_client_send(VoiceClient *c, VoiceCmd cmd); /* VOICE_CMD_STOP or VOICE
 /* Closes the connection; no callback fires after this returns. */
 void voice_client_free(VoiceClient *c);
 
+#define VOICE_SAVE_TIMEOUT_MS 3000 /* no answer by then: report it and drop the connection */
+
+/* error: NULL when the daemon saved the setting, else why not. */
+typedef void (*VoiceSaveDoneFn)(const char *error, gpointer user_data);
+/* Asks the daemon to save voice/<key>: <value> ("SET key value" on its own connection, answered
+ * by OK or ERR <reason>). Fire and forget: done runs exactly once on the main loop. */
+void voice_client_save_setting(const char *socket_path, const char *key, const char *value,
+                               VoiceSaveDoneFn done, gpointer user_data);
+
 #endif

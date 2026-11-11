@@ -26,6 +26,8 @@ struct _IBusRimeEngine {
   VoiceClient* voice_client;
   IBusLookupTable* voice_table; /* review note rows; separate from Rime's candidates */
   gboolean voice_note_shown;
+  guint voice_blink_id;     /* review cursor blink timer, 0 when not blinking */
+  gint64 voice_blink_since; /* last redraw caused by the user (monotonic µs) */
 };
 
 struct _IBusRimeEngineClass {
@@ -169,6 +171,10 @@ ibus_rime_engine_init (IBusRimeEngine *rime_engine)
 static void
 ibus_rime_engine_destroy (IBusRimeEngine *rime_engine)
 {
+  if (rime_engine->voice_blink_id) {
+    g_source_remove(rime_engine->voice_blink_id);
+    rime_engine->voice_blink_id = 0;
+  }
   if (rime_engine->voice.aux) {  /* destroy may run more than once */
     voice_client_free(rime_engine->voice_client);
     rime_engine->voice_client = NULL;
@@ -217,10 +223,14 @@ ibus_rime_engine_focus_in (IBusEngine *engine)
   apply_voice_action(rime_engine, voice_fsm_focus_in(&rime_engine->voice));
 }
 
+static void voice_blink_stop (IBusRimeEngine *rime_engine);
+static void voice_blink_restart (IBusRimeEngine *rime_engine);
+
 static void
 ibus_rime_engine_focus_out (IBusEngine *engine)
 {
   IBusRimeEngine *rime_engine = (IBusRimeEngine *)engine;
+  voice_blink_stop(rime_engine);
   apply_voice_action(rime_engine, voice_fsm_focus_out(&rime_engine->voice));
 }
 
@@ -626,6 +636,12 @@ voice_reshow_aux (IBusRimeEngine *rime_engine)
   switch (rime_engine->voice.state) {
   case VOICE_IDLE:
     return;
+  case VOICE_SETTINGS:
+    if (!rime_engine->voice_note_shown) {
+      show_voice_aux(engine, rime_engine->voice.aux->str);
+      show_voice_note(rime_engine);
+    }
+    return;
   case VOICE_REVIEW:
     if (rime_is_composing(rime_engine)) {
       rime_engine->voice_note_shown = FALSE;
@@ -633,6 +649,7 @@ voice_reshow_aux (IBusRimeEngine *rime_engine)
     } else if (!rime_engine->voice_note_shown) {
       show_voice_aux(engine, rime_engine->voice.aux->str);
       show_voice_note(rime_engine);
+      voice_blink_restart(rime_engine);
     }
     return;
   default:
@@ -655,6 +672,134 @@ voice_commit_or_insert (IBusRimeEngine *rime_engine, const char *text)
 static gboolean ibus_rime_engine_process_key_event (IBusEngine *engine, guint keyval,
                                                     guint keycode, guint modifiers);
 
+
+/* Return after a commit, on a short timer: the commit reaches the application first, and after
+ * Shift+Enter the Shift release has been processed, so the application sees a plain Return. */
+static gboolean
+voice_send_return_cb (gpointer data)
+{
+  IBusEngine *engine = data;
+  ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, 0);
+  ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, IBUS_RELEASE_MASK);
+  g_object_unref(engine);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+voice_setting_saved (const char *error, gpointer user_data)
+{
+  if (error) {
+    gchar *msg = g_strdup_printf("语音设置已生效，但未保存：%s", error);
+    ibus_rime_show_message(msg, NULL);
+    g_free(msg);
+  }
+}
+
+/* Options changed in the panel, saved shortly after the last change: quick ←/→ presses then
+ * cost one save per option, and the saved value is the one in effect. */
+static GHashTable *voice_unsaved;  /* key -> value, both static strings */
+static guint voice_save_timer;
+
+static gboolean
+voice_save_settings_cb (gpointer data)
+{
+  voice_save_timer = 0;
+  gchar *path = voice_client_default_path();
+  GHashTableIter it;
+  gpointer key, value;
+  g_hash_table_iter_init(&it, voice_unsaved);
+  while (g_hash_table_iter_next(&it, &key, &value)) {
+    voice_client_save_setting(path, key, value, voice_setting_saved, NULL);
+  }
+  g_hash_table_remove_all(voice_unsaved);
+  g_free(path);
+  return G_SOURCE_REMOVE;
+}
+
+/* The settings panel changed an option: apply it now, and have the daemon save it into
+ * ibus_rime.custom.yaml so it survives the next deploy. */
+static void
+voice_apply_setting (const char *key, const char *value)
+{
+  if (!strcmp(key, "enter_sends")) {
+    g_ibus_rime_settings.voice_enter_sends = !strcmp(value, "true");
+  } else if (!strcmp(key, "review")) {
+    g_ibus_rime_settings.voice_review = !strcmp(value, "true");
+  } else if (!strcmp(key, "cursor")) {
+    g_ibus_rime_settings.voice_cursor_mark = voice_cursor_mark(value);
+  } else if (!strcmp(key, "hotkey")) {
+    guint keyval = ibus_keyval_from_name(value);
+    if (keyval != IBUS_KEY_VoidSymbol) g_ibus_rime_settings.voice_hotkey = keyval;
+  }
+  if (!voice_unsaved) voice_unsaved = g_hash_table_new(g_str_hash, g_str_equal);
+  g_hash_table_insert(voice_unsaved, (gpointer)key, (gpointer)value);
+  if (voice_save_timer) g_source_remove(voice_save_timer);
+  voice_save_timer = g_timeout_add(400, voice_save_settings_cb, NULL);
+}
+
+/* Review cursor blinking, following the desktop's cursor settings (GNOME: cursor-blink,
+ * cursor-blink-time for a whole on+off cycle, cursor-blink-timeout in seconds of idleness after
+ * which the cursor stays on, as GTK does). Each phase re-sends the note table. */
+static gboolean voice_blink_enabled = TRUE;
+static guint voice_blink_half_ms = 600;
+static gint64 voice_blink_timeout_us = 10 * G_USEC_PER_SEC;
+
+static void
+voice_blink_load_settings (void)
+{
+  static gboolean loaded = FALSE;
+  if (loaded) return;
+  loaded = TRUE;
+  GSettingsSchemaSource *src = g_settings_schema_source_get_default();
+  GSettingsSchema *schema =
+      src ? g_settings_schema_source_lookup(src, "org.gnome.desktop.interface", TRUE) : NULL;
+  if (!schema) return;
+  GSettings *gs = g_settings_new("org.gnome.desktop.interface");
+  if (g_settings_schema_has_key(schema, "cursor-blink"))
+    voice_blink_enabled = g_settings_get_boolean(gs, "cursor-blink");
+  if (g_settings_schema_has_key(schema, "cursor-blink-time"))
+    voice_blink_half_ms = CLAMP(g_settings_get_int(gs, "cursor-blink-time"), 200, 4000) / 2;
+  if (g_settings_schema_has_key(schema, "cursor-blink-timeout"))
+    voice_blink_timeout_us = (gint64)MAX(1, g_settings_get_int(gs, "cursor-blink-timeout")) * G_USEC_PER_SEC;
+  g_object_unref(gs);
+  g_settings_schema_unref(schema);
+}
+
+static void
+voice_blink_stop (IBusRimeEngine *rime_engine)
+{
+  if (rime_engine->voice_blink_id) {
+    g_source_remove(rime_engine->voice_blink_id);
+    rime_engine->voice_blink_id = 0;
+  }
+}
+
+static gboolean
+voice_blink_cb (gpointer data)
+{
+  IBusRimeEngine *rime_engine = data;
+  VoiceFsm *f = &rime_engine->voice;
+  gboolean idle = g_get_monotonic_time() - rime_engine->voice_blink_since > voice_blink_timeout_us;
+  if (f->state != VOICE_REVIEW || !rime_engine->voice_note_shown ||
+      rime_is_composing(rime_engine) || (idle && !f->blink_off)) {
+    rime_engine->voice_blink_id = 0;  /* left the note, or idle with the mark shown: stop */
+    return G_SOURCE_REMOVE;
+  }
+  voice_fsm_blink(f);
+  show_voice_note(rime_engine);
+  return G_SOURCE_CONTINUE;
+}
+
+/* (Re)start blinking from the "on" phase after the note was redrawn for the user. */
+static void
+voice_blink_restart (IBusRimeEngine *rime_engine)
+{
+  voice_blink_load_settings();
+  voice_blink_stop(rime_engine);
+  if (!voice_blink_enabled || rime_engine->voice.state != VOICE_REVIEW) return;
+  rime_engine->voice_blink_since = g_get_monotonic_time();
+  rime_engine->voice_blink_id = g_timeout_add(voice_blink_half_ms, voice_blink_cb, rime_engine);
+}
 
 /* Applies what the voice state machine decided. Returns whether the key is consumed. */
 static gboolean
@@ -684,13 +829,16 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
   }
   if (a.note) {
     show_voice_note(rime_engine);
+    voice_blink_restart(rime_engine);
   }
   if (a.commit) {
     ibus_engine_commit_text(engine, ibus_text_new_from_string(a.commit));
   }
-  if (a.commit && a.send_return) {  /* voice/enter_sends: "commit and send" */
-    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, 0);
-    ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, IBUS_RELEASE_MASK);
+  if (a.send_return) {  /* "commit and send" */
+    g_timeout_add(30, voice_send_return_cb, g_object_ref(engine));
+  }
+  if (a.setting_key) {
+    voice_apply_setting(a.setting_key, a.setting_value);
   }
   if (a.notify) {
     ibus_rime_show_message(a.notify, NULL);

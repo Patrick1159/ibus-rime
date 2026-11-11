@@ -124,3 +124,81 @@ void voice_client_free(VoiceClient *c) {
   if (c->conn) g_io_stream_close(G_IO_STREAM(c->conn), NULL, NULL);
   unref(c);
 }
+
+/* ---- one-shot settings save ---- */
+
+typedef struct {
+  char *line;
+  VoiceSaveDoneFn done;
+  gpointer user_data;
+  GSocketConnection *conn;
+  GDataInputStream *in;
+  GCancellable *cancel;
+  guint timeout_id;
+  gboolean timed_out;
+} SaveReq;
+
+static void save_finish(SaveReq *r, const char *error) {
+  if (r->timeout_id) g_source_remove(r->timeout_id);
+  r->done(r->timed_out ? "no answer from the voice daemon in time" : error, r->user_data);
+  g_object_unref(r->cancel);
+  g_clear_object(&r->in);
+  if (r->conn) g_io_stream_close(G_IO_STREAM(r->conn), NULL, NULL);
+  g_clear_object(&r->conn);
+  g_free(r->line);
+  g_free(r);
+}
+
+static void on_save_reply(GObject *src, GAsyncResult *res, gpointer data) {
+  SaveReq *r = data;
+  char *line = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(src), res, NULL, NULL);
+  if (line) g_strchomp(line);
+  if (line && !strcmp(line, "OK")) save_finish(r, NULL);
+  else if (line && g_str_has_prefix(line, "ERR ")) save_finish(r, line + 4);
+  else save_finish(r, "no answer from the voice daemon");
+  g_free(line);
+}
+
+static void on_save_connected(GObject *src, GAsyncResult *res, gpointer data) {
+  SaveReq *r = data;
+  GError *err = NULL;
+  r->conn = g_socket_client_connect_finish(G_SOCKET_CLIENT(src), res, &err);
+  g_object_unref(src);
+  if (!r->conn) {
+    char *msg = g_strdup_printf("voice daemon not reachable: %s", err->message);
+    g_error_free(err);
+    save_finish(r, msg);
+    g_free(msg);
+    return;
+  }
+  GOutputStream *out = g_io_stream_get_output_stream(G_IO_STREAM(r->conn));
+  if (!g_output_stream_write_all(out, r->line, strlen(r->line), NULL, r->cancel, NULL)) {
+    save_finish(r, "could not write to the voice daemon");
+    return;
+  }
+  r->in = g_data_input_stream_new(g_io_stream_get_input_stream(G_IO_STREAM(r->conn)));
+  g_data_input_stream_set_newline_type(r->in, G_DATA_STREAM_NEWLINE_TYPE_LF);
+  g_data_input_stream_read_line_async(r->in, G_PRIORITY_DEFAULT, r->cancel, on_save_reply, r);
+}
+
+static gboolean on_save_timeout(gpointer data) {
+  SaveReq *r = data;
+  r->timeout_id = 0;
+  r->timed_out = TRUE;
+  g_cancellable_cancel(r->cancel); /* the pending connect or read finishes with an error */
+  return G_SOURCE_REMOVE;
+}
+
+void voice_client_save_setting(const char *socket_path, const char *key, const char *value,
+                               VoiceSaveDoneFn done, gpointer user_data) {
+  SaveReq *r = g_new0(SaveReq, 1);
+  r->line = g_strdup_printf("SET %s %s\n", key, value);
+  r->done = done;
+  r->user_data = user_data;
+  r->cancel = g_cancellable_new();
+  r->timeout_id = g_timeout_add(VOICE_SAVE_TIMEOUT_MS, on_save_timeout, r);
+  GSocketClient *sc = g_socket_client_new();
+  GSocketAddress *addr = g_unix_socket_address_new(socket_path);
+  g_socket_client_connect_async(sc, G_SOCKET_CONNECTABLE(addr), r->cancel, on_save_connected, r);
+  g_object_unref(addr);
+}
