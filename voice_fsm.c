@@ -299,6 +299,24 @@ static void review_reset(VoiceFsm *f) {
   f->cursor = 0;
 }
 
+/* Keys the compositor has already applied by the time we see them: replaying one later through
+ * forward_key_event (a virtual keyboard) would apply it a second time, e.g. toggle Caps Lock
+ * back against its LED or leave a Shift held. Queued keys carry the modifier mask anyway. */
+static gboolean modifier_or_lock(guint keyval) {
+  switch (keyval) {
+  case IBUS_KEY_Shift_L: case IBUS_KEY_Shift_R: case IBUS_KEY_Shift_Lock:
+  case IBUS_KEY_Control_L: case IBUS_KEY_Control_R:
+  case IBUS_KEY_Alt_L: case IBUS_KEY_Alt_R: case IBUS_KEY_Meta_L: case IBUS_KEY_Meta_R:
+  case IBUS_KEY_Super_L: case IBUS_KEY_Super_R: case IBUS_KEY_Hyper_L: case IBUS_KEY_Hyper_R:
+  case IBUS_KEY_Caps_Lock: case IBUS_KEY_Num_Lock: case IBUS_KEY_Scroll_Lock:
+  case IBUS_KEY_ISO_Level3_Shift: case IBUS_KEY_ISO_Level5_Shift: case IBUS_KEY_Mode_switch:
+  case IBUS_KEY_ISO_Next_Group: case IBUS_KEY_ISO_Prev_Group:
+    return TRUE;
+  default:
+    return FALSE;
+  }
+}
+
 static gboolean bare(guint modifiers) {
   return (modifiers & ~IGNORED_MODS) == 0;
 }
@@ -673,7 +691,7 @@ VoiceAction voice_fsm_key(VoiceFsm *f, guint keyval, guint keycode, guint modifi
         return pass(TRUE);
       }
     }
-    if (!hot) {
+    if (!hot && !modifier_or_lock(keyval)) {
       VoiceKey k = {keyval, keycode, modifiers};
       g_array_append_val(f->queued, k);
     }

@@ -65,7 +65,7 @@ typedef struct {
   GString *compose_hint;   /* aux text while Rime composes inside the review */
   GString *commit_buf;
   GString *notify_buf;
-  GArray *queued;          /* VoiceKey typed while FINALIZING */
+  GArray *queued;          /* VoiceKey typed while FINALIZING (modifier and lock keys excluded) */
 } VoiceFsm;
 
 #define VOICE_AUX_RECORDING_FMT "🎤 录音中 · %s 结束 · %s · Esc 取消 · %s+I 设置" /* hotkey, Enter hint, hotkey */
