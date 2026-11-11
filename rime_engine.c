@@ -673,15 +673,37 @@ static gboolean ibus_rime_engine_process_key_event (IBusEngine *engine, guint ke
                                                     guint keycode, guint modifiers);
 
 
+/* Keys typed while the result was pending, through the full key path, so they land in the
+ * review buffer when reviewing. */
+static void
+voice_replay (IBusEngine *engine, const VoiceKey *keys, guint n)
+{
+  for (guint i = 0; i < n; ++i) {
+    if (!ibus_rime_engine_process_key_event(engine, keys[i].keyval, keys[i].keycode,
+                                            keys[i].modifiers)) {
+      ibus_engine_forward_key_event(engine, keys[i].keyval, keys[i].keycode, keys[i].modifiers);
+    }
+  }
+}
+
+typedef struct {
+  IBusEngine *engine;
+  VoiceKey *keys;  /* replayed after the Return: they were typed after the "send" */
+  guint n;
+} VoiceReturn;
+
 /* Return after a commit, on a short timer: the commit reaches the application first, and after
  * Shift+Enter the Shift release has been processed, so the application sees a plain Return. */
 static gboolean
 voice_send_return_cb (gpointer data)
 {
-  IBusEngine *engine = data;
-  ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, 0);
-  ibus_engine_forward_key_event(engine, IBUS_KEY_Return, RETURN_KEYCODE, IBUS_RELEASE_MASK);
-  g_object_unref(engine);
+  VoiceReturn *r = data;
+  ibus_engine_forward_key_event(r->engine, IBUS_KEY_Return, RETURN_KEYCODE, 0);
+  ibus_engine_forward_key_event(r->engine, IBUS_KEY_Return, RETURN_KEYCODE, IBUS_RELEASE_MASK);
+  voice_replay(r->engine, r->keys, r->n);
+  g_object_unref(r->engine);
+  g_free(r->keys);
+  g_free(r);
   return G_SOURCE_REMOVE;
 }
 
@@ -834,8 +856,18 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
   if (a.commit) {
     ibus_engine_commit_text(engine, ibus_text_new_from_string(a.commit));
   }
-  if (a.send_return) {  /* "commit and send" */
-    g_timeout_add(30, voice_send_return_cb, g_object_ref(engine));
+  VoiceKey *keys = NULL;
+  guint n_keys = 0;
+  if (a.replay) {
+    keys = g_memdup2(voice_fsm_queued(&rime_engine->voice, &n_keys), n_keys * sizeof(VoiceKey));
+    voice_fsm_drop_queue(&rime_engine->voice);
+  }
+  if (a.send_return) {  /* "commit and send"; queued keys follow the Return */
+    VoiceReturn *r = g_new0(VoiceReturn, 1);
+    r->engine = g_object_ref(engine);
+    r->keys = g_steal_pointer(&keys);
+    r->n = n_keys;
+    g_timeout_add(30, voice_send_return_cb, r);
   }
   if (a.setting_key) {
     voice_apply_setting(a.setting_key, a.setting_value);
@@ -843,18 +875,8 @@ apply_voice_action (IBusRimeEngine *rime_engine, VoiceAction a)
   if (a.notify) {
     ibus_rime_show_message(a.notify, NULL);
   }
-  if (a.replay) {
-    guint n = 0;
-    VoiceKey *keys = g_memdup2(voice_fsm_queued(&rime_engine->voice, &n), n * sizeof(VoiceKey));
-    voice_fsm_drop_queue(&rime_engine->voice);
-    /* through the full key path, so keys land in the review buffer when reviewing */
-    for (guint i = 0; i < n; ++i) {
-      if (!ibus_rime_engine_process_key_event(engine, keys[i].keyval, keys[i].keycode,
-                                              keys[i].modifiers)) {
-        ibus_engine_forward_key_event(engine, keys[i].keyval, keys[i].keycode,
-                                      keys[i].modifiers);
-      }
-    }
+  if (keys) {
+    voice_replay(engine, keys, n_keys);
     g_free(keys);
   }
   return a.consume;

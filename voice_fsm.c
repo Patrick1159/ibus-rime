@@ -16,6 +16,8 @@ void voice_fsm_init(VoiceFsm *f, guint hotkey_keyval, gboolean review_enabled) {
   f->review_enabled = review_enabled;
   f->armed = FALSE;
   f->from_review = FALSE;
+  f->then = VOICE_THEN_REVIEW;
+  f->drop_release = 0;
   f->aux = g_string_new("");
   f->partial = g_string_new("");
   f->review = g_string_new("");
@@ -308,7 +310,9 @@ static VoiceAction start_recording(VoiceFsm *f, gboolean from_review) {
   f->state = VOICE_RECORDING;
   g_string_truncate(f->partial, 0);
   a.send = VOICE_CMD_START;
-  g_string_printf(f->aux, VOICE_AUX_RECORDING_FMT, hotkey_label(f->hotkey), hotkey_label(f->hotkey));
+  f->then = VOICE_THEN_REVIEW;
+  g_string_printf(f->aux, VOICE_AUX_RECORDING_FMT, hotkey_label(f->hotkey), enter_hint(f->enter_sends),
+                  hotkey_label(f->hotkey));
   a.aux = f->aux->str;
   return a;
 }
@@ -330,9 +334,25 @@ static VoiceAction leave_session(VoiceFsm *f, VoiceCmd send, const char *notify,
     a.aux = set_aux(f, "", NULL);
   }
   f->from_review = FALSE;
+  f->then = VOICE_THEN_REVIEW;
   a.send = send;
   a.notify = notify;
   a.replay = f->queued->len > 0;
+  return a;
+}
+
+/* Enter means "commit and send": right Shift+Enter by default, plain (or left Shift+) Enter
+ * when enter_sends. */
+static gboolean enter_sends(VoiceFsm *f, guint modifiers) {
+  gboolean alt = (modifiers & IBUS_SHIFT_MASK) && f->shift_r_down;
+  return f->enter_sends ? !alt : alt;
+}
+
+static VoiceAction stop_recording(VoiceFsm *f) {
+  VoiceAction a = pass(TRUE);
+  f->armed = FALSE;
+  f->state = VOICE_FINALIZING;
+  a.send = VOICE_CMD_STOP;
   return a;
 }
 
@@ -522,8 +542,7 @@ static VoiceAction review_key(VoiceFsm *f, guint keyval, guint modifiers, gboole
   case IBUS_KEY_Return:
   case IBUS_KEY_KP_Enter: {
     gboolean shift = (modifiers & IBUS_SHIFT_MASK) != 0;
-    gboolean alt = shift && f->shift_r_down; /* right Shift+Enter: the non-default action */
-    gboolean send = f->enter_sends ? !alt : alt;
+    gboolean send = enter_sends(f, modifiers);
     a = finish_review(f, TRUE, send && !shift);
     f->return_pending = send && shift && a.commit; /* sent on the Shift release */
     f->swallow_shift = shift;
@@ -582,6 +601,10 @@ VoiceAction voice_fsm_key(VoiceFsm *f, guint keyval, guint keycode, guint modifi
 
   if (hot) f->hotkey_down = !release;
   if (keyval == IBUS_KEY_Shift_R) f->shift_r_down = !release;
+  if (release && f->drop_release && keyval == f->drop_release) {
+    f->drop_release = 0;
+    return pass(TRUE);
+  }
   if (f->swallow_shift) {
     gboolean shift = keyval == IBUS_KEY_Shift_L || keyval == IBUS_KEY_Shift_R;
     if (shift && release) {
@@ -622,12 +645,19 @@ VoiceAction voice_fsm_key(VoiceFsm *f, guint keyval, guint keycode, guint modifi
       return pass(TRUE);
     }
     if (hot && release && f->armed) {
-      f->armed = FALSE;
-      f->state = VOICE_FINALIZING;
-      a = pass(TRUE);
-      a.send = VOICE_CMD_STOP;
+      a = stop_recording(f);
       a.aux = f->partial->len ? set_aux(f, VOICE_AUX_PARTIAL_FINALIZING, f->partial->str)
                               : set_aux(f, VOICE_AUX_FINALIZING, NULL);
+      return a;
+    }
+    if ((keyval == IBUS_KEY_Return || keyval == IBUS_KEY_KP_Enter) && !release) {
+      gboolean send = enter_sends(f, modifiers);
+      a = stop_recording(f);
+      f->then = send ? VOICE_THEN_SEND : VOICE_THEN_COMMIT;
+      f->drop_release = keyval;
+      f->swallow_shift = (modifiers & IBUS_SHIFT_MASK) != 0; /* see the Shift release above */
+      f->return_pending = FALSE;
+      a.aux = set_aux(f, send ? VOICE_AUX_FINALIZING_SEND : VOICE_AUX_FINALIZING_COMMIT, NULL);
       return a;
     }
     if (!release) f->armed = FALSE;
@@ -693,6 +723,17 @@ VoiceAction voice_fsm_event(VoiceFsm *f, VoiceEvType type, const char *payload) 
                     payload);
     return a;
   case VOICE_EV_FINAL:
+    if (f->then != VOICE_THEN_REVIEW) { /* stopped by Enter: commit the would-be note */
+      gboolean send = f->then == VOICE_THEN_SEND;
+      gboolean held = f->swallow_shift; /* that Enter's Shift is still down */
+      if (!f->from_review) review_reset(f);
+      review_insert(f, payload);
+      leave_session(f, VOICE_CMD_NONE, NULL, FALSE);
+      a = finish_review(f, TRUE, send && !held);
+      f->return_pending = send && held && a.commit;
+      a.replay = f->queued->len > 0;
+      return a;
+    }
     if (!*payload) return leave_session(f, VOICE_CMD_NONE, NULL, FALSE);
     if (f->review_enabled || f->from_review) {
       if (!f->from_review) review_reset(f);
@@ -724,6 +765,7 @@ VoiceAction voice_fsm_focus_out(VoiceFsm *f) {
   f->shift_r_down = FALSE;
   f->return_pending = FALSE;
   f->swallow_shift = FALSE;
+  f->drop_release = 0;
   if (f->state == VOICE_SETTINGS) { /* close it; a review behind it stays */
     VoiceAction a = close_settings(f);
     a.consume = FALSE;

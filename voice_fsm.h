@@ -8,6 +8,8 @@
 
 typedef enum { VOICE_IDLE, VOICE_RECORDING, VOICE_FINALIZING, VOICE_REVIEW, VOICE_SETTINGS } VoiceState;
 typedef enum { VOICE_CMD_NONE, VOICE_CMD_START, VOICE_CMD_STOP, VOICE_CMD_CANCEL } VoiceCmd;
+/* What to do with the result of a recording stopped by Enter instead of the hotkey. */
+typedef enum { VOICE_THEN_REVIEW, VOICE_THEN_COMMIT, VOICE_THEN_SEND } VoiceThen;
 
 typedef struct {
   gboolean consume;     /* TRUE: voice handled the key. FALSE: hand it to Rime; while in REVIEW
@@ -19,7 +21,8 @@ typedef struct {
   const char *commit;   /* NULL: nothing to commit (owned by the fsm) */
   const char *notify;   /* NULL: no desktop notification */
   gboolean replay;      /* after commit, replay voice_fsm_queued() keys in order */
-  gboolean send_return; /* forward a Return press+release, after the commit if there is one */
+  gboolean send_return; /* forward a Return press+release, after the commit if there is one;
+                           with replay, the queued keys are replayed after the Return */
   const char *setting_key;   /* settings panel changed voice/<key> to setting_value (static */
   const char *setting_value; /* strings): the glue applies it and saves it */
 } VoiceAction;
@@ -44,6 +47,9 @@ typedef struct {
   gboolean swallow_shift;  /* Shift+Enter ended a review: keep its Shift release from Rime,
                               which never saw the Enter and would take a lone Shift tap */
   gboolean from_review;    /* current recording was started from REVIEW */
+  VoiceThen then;          /* Enter while RECORDING stops it and, at FINAL, does what that Enter
+                              (or right Shift+Enter) does in REVIEW, without showing the note */
+  guint drop_release;      /* keyval whose release to swallow (the Enter that stopped recording) */
   GString *aux;            /* current auxiliary text ("" when nothing to show) */
   GString *partial;        /* latest PARTIAL payload */
   GString *review;         /* review buffer */
@@ -62,8 +68,10 @@ typedef struct {
   GArray *queued;          /* VoiceKey typed while FINALIZING */
 } VoiceFsm;
 
-#define VOICE_AUX_RECORDING_FMT "🎤 录音中 · %s 结束 · Esc 取消 · %s+I 设置" /* %s: hotkey label */
+#define VOICE_AUX_RECORDING_FMT "🎤 录音中 · %s 结束 · %s · Esc 取消 · %s+I 设置" /* hotkey, Enter hint, hotkey */
 #define VOICE_AUX_FINALIZING "⏳ 识别中…"
+#define VOICE_AUX_FINALIZING_COMMIT VOICE_AUX_FINALIZING " 完成后上屏"
+#define VOICE_AUX_FINALIZING_SEND VOICE_AUX_FINALIZING " 完成后发送"
 #define VOICE_AUX_PARTIAL_RECORDING "🎤 "
 #define VOICE_AUX_PARTIAL_FINALIZING "⏳ "
 /* Review note: the header block (key hints, then a rule) goes to the auxiliary text; the
